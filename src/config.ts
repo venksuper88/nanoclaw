@@ -6,7 +6,14 @@ import { readEnvFile } from './env.js';
 // Read config values from .env (falls back to process.env).
 // Secrets (API keys, tokens) are NOT read here — they are loaded only
 // by the credential proxy (credential-proxy.ts), never exposed to containers.
-const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER']);
+const envConfig = readEnvFile([
+  'ASSISTANT_NAME',
+  'ASSISTANT_HAS_OWN_NUMBER',
+  'OLLAMA_BASE_URL',
+  'MEMORY_ENABLED',
+  'MEMORY_LLM_MODEL',
+  'MEMORY_EMBED_MODEL',
+]);
 
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -71,3 +78,17 @@ export const TRIGGER_PATTERN = new RegExp(
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// Memory service (mem0 + Ollama)
+export const OLLAMA_BASE_URL =
+  process.env.OLLAMA_BASE_URL ||
+  envConfig.OLLAMA_BASE_URL ||
+  'http://localhost:11434';
+export const MEMORY_ENABLED =
+  (process.env.MEMORY_ENABLED || envConfig.MEMORY_ENABLED || 'true') === 'true';
+export const MEMORY_LLM_MODEL =
+  process.env.MEMORY_LLM_MODEL || envConfig.MEMORY_LLM_MODEL || 'llama3.2';
+export const MEMORY_EMBED_MODEL =
+  process.env.MEMORY_EMBED_MODEL ||
+  envConfig.MEMORY_EMBED_MODEL ||
+  'nomic-embed-text';

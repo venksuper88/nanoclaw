@@ -56,6 +56,7 @@ import {
   loadSenderAllowlist,
   shouldDropMessage,
 } from './sender-allowlist.js';
+import { MemoryService } from './memory.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
@@ -71,6 +72,7 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+const memoryService = new MemoryService();
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -179,7 +181,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  const rawPrompt = formatMessages(missedMessages, TIMEZONE);
+
+  // Memory: start session tracking and enrich with relevant memories
+  memoryService.startSession(group.folder);
+  const prompt = await memoryService.enrichMessage(
+    chatJid,
+    group.folder,
+    rawPrompt,
+  );
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -222,6 +232,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
+        memoryService.accumulateOutput(group.folder, text);
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
@@ -249,6 +260,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         { group: group.name },
         'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
       );
+      memoryService.endSession(group.folder);
       return true;
     }
     // Roll back cursor so retries can re-process these messages
@@ -258,8 +270,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       { group: group.name },
       'Agent error, rolled back message cursor for retry',
     );
+    memoryService.endSession(group.folder);
     return false;
   }
+
+  // Memory: extract facts from conversation and store for future retrieval
+  await memoryService.writeBack(group.folder, rawPrompt);
+  memoryService.endSession(group.folder);
 
   return true;
 }
@@ -417,7 +434,15 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
+          let formatted = formatMessages(messagesToSend, TIMEZONE);
+
+          // Memory: enrich piped messages with relevant memories
+          // (inject-once tracking filters out already-loaded memories)
+          formatted = await memoryService.enrichMessage(
+            chatJid,
+            group.folder,
+            formatted,
+          );
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(
@@ -474,6 +499,7 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
+  await memoryService.init();
   restoreRemoteControl();
 
   // Start credential proxy (containers route API calls through this)
@@ -631,6 +657,11 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
+    onMemoryWriteBack: (groupFolder, text) => {
+      memoryService.writeBack(groupFolder, text).catch((err) =>
+        logger.warn({ err, groupFolder }, 'Pre-compact memory write-back failed'),
+      );
+    },
     onTasksChanged: () => {
       const tasks = getAllTasks();
       const taskRows = tasks.map((t) => ({

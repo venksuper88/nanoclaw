@@ -140,9 +140,11 @@ function getSessionSummary(sessionId: string, transcriptPath: string): string | 
 }
 
 /**
- * Archive the full transcript to conversations/ before compaction.
+ * Archive the full transcript to conversations/ before compaction,
+ * and write it to the IPC memory directory so the host can extract
+ * facts into mem0 before the context is summarized away.
  */
-function createPreCompactHook(assistantName?: string): HookCallback {
+function createPreCompactHook(assistantName?: string, groupFolder?: string): HookCallback {
   return async (input, _toolUseId, _context) => {
     const preCompact = input as PreCompactHookInput;
     const transcriptPath = preCompact.transcript_path;
@@ -176,6 +178,31 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       fs.writeFileSync(filePath, markdown);
 
       log(`Archived conversation to ${filePath}`);
+
+      // Write transcript to IPC for host-side memory extraction.
+      // This captures facts before compaction summarizes them away.
+      if (groupFolder) {
+        try {
+          const memoryDir = path.join('/workspace/ipc', 'memory');
+          fs.mkdirSync(memoryDir, { recursive: true });
+          const memFile = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
+          const memPath = path.join(memoryDir, memFile);
+          const conversationText = messages
+            .map(m => `${m.role === 'user' ? 'User' : (assistantName || 'Assistant')}: ${m.content}`)
+            .join('\n');
+          const tmpPath = `${memPath}.tmp`;
+          fs.writeFileSync(tmpPath, JSON.stringify({
+            type: 'pre_compact_writeback',
+            groupFolder,
+            text: conversationText,
+            timestamp: new Date().toISOString(),
+          }));
+          fs.renameSync(tmpPath, memPath);
+          log(`Wrote pre-compact memory IPC (${messages.length} messages)`);
+        } catch (err) {
+          log(`Failed to write memory IPC: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     } catch (err) {
       log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -425,7 +452,7 @@ async function runQuery(
         },
       },
       hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+        PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName, containerInput.groupFolder)] }],
       },
     }
   })) {

@@ -23,6 +23,7 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
+  onMemoryWriteBack?: (groupFolder: string, text: string) => void;
 }
 
 let ipcWatcherRunning = false;
@@ -144,6 +145,51 @@ export function startIpcWatcher(deps: IpcDeps): void {
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
+
+      // Process memory write-back files (pre-compaction fact extraction)
+      if (deps.onMemoryWriteBack) {
+        const memoryDir = path.join(ipcBaseDir, sourceGroup, 'memory');
+        try {
+          if (fs.existsSync(memoryDir)) {
+            const memFiles = fs
+              .readdirSync(memoryDir)
+              .filter((f) => f.endsWith('.json'));
+            for (const file of memFiles) {
+              const filePath = path.join(memoryDir, file);
+              try {
+                const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+                if (
+                  data.type === 'pre_compact_writeback' &&
+                  data.groupFolder &&
+                  data.text
+                ) {
+                  deps.onMemoryWriteBack(data.groupFolder, data.text);
+                  logger.debug(
+                    { sourceGroup },
+                    'Pre-compact memory write-back triggered',
+                  );
+                }
+                fs.unlinkSync(filePath);
+              } catch (err) {
+                logger.error(
+                  { file, sourceGroup, err },
+                  'Error processing memory IPC file',
+                );
+                try {
+                  fs.unlinkSync(filePath);
+                } catch {
+                  /* ignore */
+                }
+              }
+            }
+          }
+        } catch (err) {
+          logger.error(
+            { err, sourceGroup },
+            'Error reading IPC memory directory',
+          );
+        }
       }
     }
 
