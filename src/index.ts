@@ -4,12 +4,19 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
+  DASHBOARD_PORT,
+  DASHBOARD_TOKEN,
+  DATA_DIR,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TIMEZONE,
+  TRANSIENT_CLOSE_DELAY_MS,
   TRIGGER_PATTERN,
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
+import { dashboardEvents } from './dashboard/events.js';
+import { setChatSendFn, setMemoryService, setSessionKillFn } from './dashboard/routes.js';
+import { startDashboard } from './dashboard/server.js';
 import './channels/index.js';
 import {
   getChannelFactory,
@@ -154,7 +161,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (!group) return true;
 
   const channel = findChannel(channels, chatJid);
-  if (!channel) {
+  // Dashboard groups (dash:*) don't need a channel — they communicate via socket.io
+  if (!channel && !chatJid.startsWith('dash:') && channels.length > 0) {
     logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
     return true;
   }
@@ -189,6 +197,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     chatJid,
     group.folder,
     rawPrompt,
+    group.memoryMode || 'full',
+    group.memoryScopes,
   );
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
@@ -207,17 +217,25 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   const resetIdleTimer = () => {
-    if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      logger.debug(
-        { group: group.name },
-        'Idle timeout, closing container stdin',
-      );
-      queue.closeStdin(chatJid);
-    }, IDLE_TIMEOUT);
+    if (group.isTransient) {
+      // Transient: short close delay, resettable by piped messages
+      queue.setTransientTimer(chatJid, TRANSIENT_CLOSE_DELAY_MS);
+    } else if (group.isMain) {
+      // Main group: never auto-close — container stays alive until service restart
+      if (idleTimer) clearTimeout(idleTimer);
+    } else {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        logger.debug(
+          { group: group.name },
+          'Idle timeout, closing container stdin',
+        );
+        queue.closeStdin(chatJid);
+      }, IDLE_TIMEOUT);
+    }
   };
 
-  await channel.setTyping?.(chatJid, true);
+  await channel?.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
@@ -233,9 +251,54 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
         memoryService.accumulateOutput(group.folder, text);
-        await channel.sendMessage(chatJid, text);
+        dashboardEvents.emitEvent('agent:output', {
+          groupName: group.name,
+          groupFolder: group.folder,
+          text,
+        });
+        // Store agent response in DB so dashboard can load it later
+        const agentMsgId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        storeMessage({
+          id: agentMsgId,
+          chat_jid: chatJid,
+          sender: ASSISTANT_NAME,
+          sender_name: ASSISTANT_NAME,
+          content: text,
+          timestamp: new Date().toISOString(),
+          is_from_me: true,
+          is_bot_message: true,
+        });
+        await channel?.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
+      // Emit context usage estimate after each output
+      try {
+        const transcriptDir = path.join(DATA_DIR, 'sessions', group.folder, '.claude', 'projects', '-workspace-group');
+        const sid = sessions[group.folder];
+        if (sid && fs.existsSync(transcriptDir)) {
+          const transcriptFile = path.join(transcriptDir, `${sid}.jsonl`);
+          if (fs.existsSync(transcriptFile)) {
+            const content = fs.readFileSync(transcriptFile, 'utf-8');
+            const lines = content.split('\n').filter(l => l.trim());
+            let activeStartIdx = 0;
+            for (let i = lines.length - 1; i >= 0; i--) {
+              if (lines[i].includes('"subtype":"init"') && lines[i].includes('"session_id"')) {
+                activeStartIdx = i;
+                break;
+              }
+            }
+            let activeBytes = 0;
+            for (let i = activeStartIdx; i < lines.length; i++) {
+              if (lines[i].includes('"type":"user"') || lines[i].includes('"type":"assistant"') || lines[i].includes('"type":"result"')) {
+                activeBytes += Buffer.byteLength(lines[i]);
+              }
+            }
+            const sizeKB = Math.round(activeBytes / 1024);
+            const percent = Math.min(100, Math.round((activeBytes / 819200) * 100));
+            dashboardEvents.emitEvent('context:update', { groupFolder: group.folder, percent, sizeKB });
+          }
+        }
+      } catch { /* ignore */ }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
     }
@@ -249,7 +312,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   });
 
-  await channel.setTyping?.(chatJid, false);
+  await channel?.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -288,7 +351,7 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  const sessionId = group.isTransient ? undefined : sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -318,7 +381,7 @@ async function runAgent(
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
-        if (output.newSessionId) {
+        if (output.newSessionId && !group.isTransient) {
           sessions[group.folder] = output.newSessionId;
           setSession(group.folder, output.newSessionId);
         }
@@ -326,6 +389,7 @@ async function runAgent(
       }
     : undefined;
 
+  const agentStart = Date.now();
   try {
     const output = await runContainerAgent(
       group,
@@ -337,12 +401,24 @@ async function runAgent(
         isMain,
         assistantName: ASSISTANT_NAME,
       },
-      (proc, containerName) =>
-        queue.registerProcess(chatJid, proc, containerName, group.folder),
+      (proc, containerName) => {
+        dashboardEvents.emitEvent('agent:spawn', {
+          groupName: group.name,
+          groupFolder: group.folder,
+          containerName,
+        });
+        queue.registerProcess(chatJid, proc, containerName, group.folder);
+      },
       wrappedOnOutput,
     );
 
-    if (output.newSessionId) {
+    dashboardEvents.emitEvent('agent:exit', {
+      groupName: group.name,
+      groupFolder: group.folder,
+      duration: Date.now() - agentStart,
+    });
+
+    if (output.newSessionId && !group.isTransient) {
       sessions[group.folder] = output.newSessionId;
       setSession(group.folder, output.newSessionId);
     }
@@ -357,6 +433,11 @@ async function runAgent(
 
     return 'success';
   } catch (err) {
+    dashboardEvents.emitEvent('agent:exit', {
+      groupName: group.name,
+      groupFolder: group.folder,
+      duration: Date.now() - agentStart,
+    });
     logger.error({ group: group.name, err }, 'Agent error');
     return 'error';
   }
@@ -442,9 +523,17 @@ async function startMessageLoop(): Promise<void> {
             chatJid,
             group.folder,
             formatted,
+            group.memoryMode || 'full',
+            group.memoryScopes,
           );
 
           if (queue.sendMessage(chatJid, formatted)) {
+            // Emit processing event so dashboard shows typing indicator
+            dashboardEvents.emitEvent('agent:spawn', {
+              groupName: group.name,
+              groupFolder: group.folder,
+              containerName: 'piped',
+            });
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
@@ -452,6 +541,10 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
+            // Reset transient close timer — user sent a follow-up
+            if (group.isTransient) {
+              queue.setTransientTimer(chatJid, TRANSIENT_CLOSE_DELAY_MS);
+            }
             // Show typing indicator while the container processes the piped message
             channel
               .setTyping?.(chatJid, true)
@@ -500,6 +593,11 @@ async function main(): Promise<void> {
   logger.info('Database initialized');
   loadState();
   await memoryService.init();
+  // Set owner groups so memory scoping knows which groups get full access
+  const ownerFolders = Object.values(registeredGroups)
+    .filter(g => g.isMain)
+    .map(g => g.folder);
+  memoryService.setOwnerGroups(ownerFolders);
   restoreRemoteControl();
 
   // Start credential proxy (containers route API calls through this)
@@ -508,10 +606,76 @@ async function main(): Promise<void> {
     PROXY_BIND_HOST,
   );
 
+  // Start Mission Control dashboard (if token is configured)
+  let dashServer: import('http').Server | null = null;
+  if (DASHBOARD_TOKEN) {
+    // Wire chat injection: dashboard can send messages to any group
+    setChatSendFn((chatJid, text, senderName) => {
+      const msgId = `dash-${Date.now()}`;
+      const timestamp = new Date().toISOString();
+      // Ensure chat entry exists (dashboard-only groups don't have channel-created entries)
+      const chatGroup = registeredGroups[chatJid];
+      storeChatMetadata(chatJid, timestamp, chatGroup?.name || chatJid, 'dashboard', false);
+      // Store as a regular user message (NOT is_bot_message) so processGroupMessages can find it
+      storeMessage({
+        id: msgId,
+        chat_jid: chatJid,
+        sender: 'venky',
+        sender_name: senderName,
+        content: text,
+        timestamp,
+        is_from_me: true,
+      });
+      // Broadcast to all dashboard clients
+      dashboardEvents.emitEvent('message:new', {
+        chatJid,
+        sender: 'venky',
+        senderName,
+        content: text,
+        timestamp,
+        isFromMe: true,
+      });
+      // Advance the message loop's global cursor so it doesn't re-discover this
+      if (timestamp > lastTimestamp) {
+        lastTimestamp = timestamp;
+        saveState();
+      }
+      // Do NOT advance lastAgentTimestamp — processGroupMessages needs to see it
+      const group = registeredGroups[chatJid];
+      if (group) {
+        const formatted = formatMessages(
+          [{ id: msgId, chat_jid: chatJid, sender: 'venky', sender_name: senderName, content: text, timestamp, is_from_me: true }],
+          TIMEZONE,
+        );
+        dashboardEvents.emitEvent('agent:spawn', {
+          groupName: group.name,
+          groupFolder: group.folder,
+          containerName: 'dashboard',
+        });
+        // Try piping to active container first
+        if (!queue.sendMessage(chatJid, formatted)) {
+          // No active container — use the standard message processing path
+          queue.enqueueMessageCheck(chatJid);
+        }
+      }
+    });
+
+    // Wire memory service for dashboard scope management
+    setMemoryService(memoryService);
+
+    // Wire session kill: dashboard can stop a group's active container
+    setSessionKillFn((chatJid) => {
+      queue.closeStdin(chatJid);
+    });
+
+    dashServer = await startDashboard(DASHBOARD_PORT);
+  }
+
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
     proxyServer.close();
+    dashServer?.close();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
@@ -590,6 +754,14 @@ async function main(): Promise<void> {
         }
       }
       storeMessage(msg);
+      dashboardEvents.emitEvent('message:new', {
+        chatJid,
+        sender: msg.sender,
+        senderName: msg.sender_name,
+        content: msg.content,
+        timestamp: msg.timestamp,
+        isFromMe: msg.is_from_me || false,
+      });
     },
     onChatMetadata: (
       chatJid: string,
@@ -617,9 +789,12 @@ async function main(): Promise<void> {
     channels.push(channel);
     await channel.connect();
   }
-  if (channels.length === 0) {
-    logger.fatal('No channels connected');
+  if (channels.length === 0 && !DASHBOARD_TOKEN) {
+    logger.fatal('No channels connected and no dashboard configured');
     process.exit(1);
+  }
+  if (channels.length === 0) {
+    logger.info('No channels connected — dashboard-only mode');
   }
 
   // Start subsystems (independently of connection handler)
@@ -630,20 +805,53 @@ async function main(): Promise<void> {
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) {
-        logger.warn({ jid }, 'No channel owns JID, cannot send message');
-        return;
-      }
       const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
+      if (!text) return;
+      const channel = findChannel(channels, jid);
+      if (channel) {
+        await channel.sendMessage(jid, text);
+      } else {
+        // Dashboard-only mode
+        dashboardEvents.emitEvent('message:new', {
+          chatJid: jid, sender: ASSISTANT_NAME, senderName: ASSISTANT_NAME,
+          content: text, timestamp: new Date().toISOString(), isFromMe: false,
+        });
+      }
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => {
+    sendMessage: async (jid, text) => {
       const channel = findChannel(channels, jid);
-      if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text);
+      if (channel) {
+        return channel.sendMessage(jid, text);
+      }
+      // Dashboard-only mode: broadcast via socket, store in DB
+      dashboardEvents.emitEvent('message:new', {
+        chatJid: jid,
+        sender: ASSISTANT_NAME,
+        senderName: ASSISTANT_NAME,
+        content: text,
+        timestamp: new Date().toISOString(),
+        isFromMe: false,
+      });
+    },
+    sendFile: async (jid, filePath, caption) => {
+      const channel = findChannel(channels, jid);
+      if (channel) {
+        if (!channel.sendFile) {
+          return channel.sendMessage(jid, caption || `[File: ${filePath}]`);
+        }
+        return channel.sendFile(jid, filePath, caption);
+      }
+      // Dashboard-only: just broadcast the caption
+      dashboardEvents.emitEvent('message:new', {
+        chatJid: jid,
+        sender: ASSISTANT_NAME,
+        senderName: ASSISTANT_NAME,
+        content: caption || `[File: ${filePath}]`,
+        timestamp: new Date().toISOString(),
+        isFromMe: false,
+      });
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
