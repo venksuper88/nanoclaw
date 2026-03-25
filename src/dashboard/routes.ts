@@ -528,40 +528,45 @@ export function createRouter(): Router {
         return;
       }
 
-      const transcriptDir = path.resolve(
+      const projectsDir = path.resolve(
         process.cwd(),
         'data',
         'sessions',
         group.folder,
         '.claude',
         'projects',
-        '-workspace-group',
       );
 
-      // Find transcript file: try session ID from DB first, fall back to most recent .jsonl
+      // Scan all project subdirectories (handles both container and tmux mode paths)
       let transcriptFile = '';
       const sessions = await getAllSessions();
       const sessionId = sessions[group.folder];
-      if (sessionId) {
-        const candidate = path.join(transcriptDir, `${sessionId}.jsonl`);
-        if (fs.existsSync(candidate)) transcriptFile = candidate;
-      }
-      if (!transcriptFile && fs.existsSync(transcriptDir)) {
-        // Session ID stale — find the most recently modified .jsonl
-        const jsonlFiles = fs
-          .readdirSync(transcriptDir)
-          .filter((f) => f.endsWith('.jsonl'));
-        if (jsonlFiles.length > 0) {
-          let newest = jsonlFiles[0];
-          let newestMtime = 0;
-          for (const f of jsonlFiles) {
-            const mt = fs.statSync(path.join(transcriptDir, f)).mtimeMs;
-            if (mt > newestMtime) {
-              newestMtime = mt;
-              newest = f;
+      if (fs.existsSync(projectsDir)) {
+        let newestMtime = 0;
+        const projectDirs = fs.readdirSync(projectsDir).filter((d) =>
+          fs.statSync(path.join(projectsDir, d)).isDirectory(),
+        );
+        for (const dir of projectDirs) {
+          const dirPath = path.join(projectsDir, dir);
+          // Try session ID first
+          if (sessionId && !transcriptFile) {
+            const candidate = path.join(dirPath, `${sessionId}.jsonl`);
+            if (fs.existsSync(candidate)) {
+              transcriptFile = candidate;
+              continue;
             }
           }
-          transcriptFile = path.join(transcriptDir, newest);
+          // Fall back to most recent .jsonl across all project dirs
+          const jsonlFiles = fs
+            .readdirSync(dirPath)
+            .filter((f) => f.endsWith('.jsonl'));
+          for (const f of jsonlFiles) {
+            const mt = fs.statSync(path.join(dirPath, f)).mtimeMs;
+            if (mt > newestMtime) {
+              newestMtime = mt;
+              transcriptFile = path.join(dirPath, f);
+            }
+          }
         }
       }
       if (!transcriptFile) {

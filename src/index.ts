@@ -280,11 +280,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
         memoryService.accumulateOutput(group.folder, text);
-        dashboardEvents.emitEvent('agent:output', {
-          groupName: group.name,
-          groupFolder: group.folder,
-          text,
-        });
+        // Skip agent:output emission if streaming already delivered this to the dashboard
+        if (!result.streamed) {
+          dashboardEvents.emitEvent('agent:output', {
+            groupName: group.name,
+            groupFolder: group.folder,
+            text,
+          });
+        }
         // Store agent response in DB — use group name as sender so each agent has its own identity
         const agentMsgId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         await storeMessage({
@@ -302,32 +305,40 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       }
       // Emit context usage from real token counts after each output
       try {
-        const transcriptDir = path.join(
+        const projectsDir = path.join(
           DATA_DIR,
           'sessions',
           group.folder,
           '.claude',
           'projects',
-          '-workspace-group',
         );
-        if (fs.existsSync(transcriptDir)) {
-          // Find transcript: try session ID first, fall back to most recent .jsonl
-          let transcriptFile = '';
+        // Scan all project subdirectories (handles both container -workspace-group and tmux host paths)
+        let transcriptFile = '';
+        if (fs.existsSync(projectsDir)) {
           const sid = sessions[group.folder];
-          if (sid) {
-            const candidate = path.join(transcriptDir, `${sid}.jsonl`);
-            if (fs.existsSync(candidate)) transcriptFile = candidate;
-          }
-          if (!transcriptFile) {
+          let newestMtime = 0;
+          const projectDirs = fs.readdirSync(projectsDir).filter((d) =>
+            fs.statSync(path.join(projectsDir, d)).isDirectory(),
+          );
+          for (const dir of projectDirs) {
+            const dirPath = path.join(projectsDir, dir);
+            // Try session ID first
+            if (sid && !transcriptFile) {
+              const candidate = path.join(dirPath, `${sid}.jsonl`);
+              if (fs.existsSync(candidate)) {
+                transcriptFile = candidate;
+                continue;
+              }
+            }
+            // Fall back to most recent .jsonl across all project dirs
             const jsonlFiles = fs
-              .readdirSync(transcriptDir)
+              .readdirSync(dirPath)
               .filter((f) => f.endsWith('.jsonl'));
-            let newestMtime = 0;
             for (const f of jsonlFiles) {
-              const mt = fs.statSync(path.join(transcriptDir, f)).mtimeMs;
+              const mt = fs.statSync(path.join(dirPath, f)).mtimeMs;
               if (mt > newestMtime) {
                 newestMtime = mt;
-                transcriptFile = path.join(transcriptDir, f);
+                transcriptFile = path.join(dirPath, f);
               }
             }
           }
@@ -554,11 +565,13 @@ async function runAgent(
 
       // Deliver result via onOutput for DB storage, channel delivery, and memory accumulation.
       // The streaming handler above only emits real-time dashboard events (no DB store).
+      // Mark as streamed so onOutput skips the agent:output dashboard emission (already shown).
       if (output.result && onOutput) {
         await onOutput({
           status: output.status,
           result: output.result,
           newSessionId: output.newSessionId,
+          streamed: true,
         });
       }
 

@@ -50,6 +50,8 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  /** Set when the result was already streamed to the dashboard via message:new */
+  streamed?: boolean;
 }
 
 interface VolumeMount {
