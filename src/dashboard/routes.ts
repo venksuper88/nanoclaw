@@ -184,7 +184,10 @@ export function createRouter(): Router {
   router.get('/api/groups/:jid/draft', async (req: Request, res: Response) => {
     const user = getUser(req);
     const jid = decodeURIComponent(req.params.jid as string);
-    if (!canAccessGroup(user, jid)) { res.status(403).json({ ok: false, error: 'Access denied' }); return; }
+    if (!canAccessGroup(user, jid)) {
+      res.status(403).json({ ok: false, error: 'Access denied' });
+      return;
+    }
     const content = await getDraft(jid);
     res.json({ ok: true, data: { content } });
   });
@@ -192,10 +195,16 @@ export function createRouter(): Router {
   router.put('/api/groups/:jid/draft', async (req: Request, res: Response) => {
     const user = getUser(req);
     const jid = decodeURIComponent(req.params.jid as string);
-    if (!canAccessGroup(user, jid)) { res.status(403).json({ ok: false, error: 'Access denied' }); return; }
+    if (!canAccessGroup(user, jid)) {
+      res.status(403).json({ ok: false, error: 'Access denied' });
+      return;
+    }
     const { content = '' } = req.body;
     await setDraft(jid, String(content));
-    dashboardEvents.emitEvent('draft:update', { chatJid: jid, content: String(content) });
+    dashboardEvents.emitEvent('draft:update', {
+      chatJid: jid,
+      content: String(content),
+    });
     res.json({ ok: true });
   });
 

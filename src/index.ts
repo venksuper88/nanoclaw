@@ -471,7 +471,9 @@ async function runAgent(
           timestamp,
           is_from_me: false,
           is_bot_message: true,
-        }).catch((err) => logger.warn({ err }, 'Failed to store stream message'));
+        }).catch((err) =>
+          logger.warn({ err }, 'Failed to store stream message'),
+        );
         dashboardEvents.emitEvent('message:new', {
           chatJid,
           sender,
@@ -482,14 +484,18 @@ async function runAgent(
         });
       };
 
-      const output = await runTmuxAgent(group, {
-        prompt,
-        sessionId,
-        groupFolder: group.folder,
-        chatJid,
-        isMain,
-        assistantName: ASSISTANT_NAME,
-      }, handleStreamEvent);
+      const output = await runTmuxAgent(
+        group,
+        {
+          prompt,
+          sessionId,
+          groupFolder: group.folder,
+          chatJid,
+          isMain,
+          assistantName: ASSISTANT_NAME,
+        },
+        handleStreamEvent,
+      );
 
       // Track session for resume
       if (output.newSessionId && !group.isTransient) {
@@ -652,7 +658,11 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          let formatted = formatMessages(messagesToSend, TIMEZONE, group.folder);
+          let formatted = formatMessages(
+            messagesToSend,
+            TIMEZONE,
+            group.folder,
+          );
 
           // Memory: enrich piped messages with relevant memories
           // (inject-once tracking filters out already-loaded memories)
@@ -700,7 +710,10 @@ async function startMessageLoop(): Promise<void> {
       if (dbErrorCount <= 3 || dbErrorCount % 30 === 0) {
         logger.error({ err, dbErrorCount }, 'Error in message loop');
       }
-      const backoffMs = Math.min(POLL_INTERVAL * Math.pow(2, Math.min(dbErrorCount, 5)), 60000);
+      const backoffMs = Math.min(
+        POLL_INTERVAL * Math.pow(2, Math.min(dbErrorCount, 5)),
+        60000,
+      );
       await new Promise((resolve) => setTimeout(resolve, backoffMs));
       continue;
     }
@@ -754,7 +767,6 @@ function ensureContainerSystemRunning(): void {
   cleanupOrphans();
 }
 
-
 const RESTART_FLAG_PATH = path.join(DATA_DIR, 'restart-flag.json');
 
 /** Store + broadcast a service message to every registered group. */
@@ -772,7 +784,9 @@ async function broadcastServiceMessage(text: string): Promise<void> {
       timestamp,
       is_from_me: true,
       is_bot_message: true,
-    }).catch((err) => logger.warn({ err }, 'broadcastServiceMessage store failed'));
+    }).catch((err) =>
+      logger.warn({ err }, 'broadcastServiceMessage store failed'),
+    );
     dashboardEvents.emitEvent('message:new', {
       chatJid: jid,
       sender: agentName,
@@ -787,7 +801,10 @@ async function broadcastServiceMessage(text: string): Promise<void> {
 
 function writeRestartFlag(reason = 'restart'): void {
   try {
-    fs.writeFileSync(RESTART_FLAG_PATH, JSON.stringify({ ts: Date.now(), reason }));
+    fs.writeFileSync(
+      RESTART_FLAG_PATH,
+      JSON.stringify({ ts: Date.now(), reason }),
+    );
   } catch (err) {
     logger.warn({ err }, 'Failed to write restart flag');
   }
@@ -797,7 +814,9 @@ async function checkAndSendOnlineNotification(): Promise<void> {
   if (!fs.existsSync(RESTART_FLAG_PATH)) return;
   try {
     fs.unlinkSync(RESTART_FLAG_PATH);
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   await broadcastServiceMessage('✅ DevenClaw is back online!').catch((err) =>
     logger.warn({ err }, 'Failed to send back-online notification'),
   );
@@ -928,13 +947,17 @@ async function main(): Promise<void> {
       },
     );
 
-    dashServer = await startDashboard(DASHBOARD_PORT, { getActiveGroupFolders: () => queue.getActiveGroupFolders() });
+    dashServer = await startDashboard(DASHBOARD_PORT, {
+      getActiveGroupFolders: () => queue.getActiveGroupFolders(),
+    });
   }
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
-    await broadcastServiceMessage('🔄 DevenClaw is restarting, back in a moment...').catch(() => {});
+    await broadcastServiceMessage(
+      '🔄 DevenClaw is restarting, back in a moment...',
+    ).catch(() => {});
     writeRestartFlag(signal);
     proxyServer.close();
     dashServer?.close();
@@ -1192,7 +1215,9 @@ async function main(): Promise<void> {
         .catch((err) => logger.warn({ err }, 'getAllRegisteredGroups failed'));
     },
     onShutdown: async () => {
-      await broadcastServiceMessage('🔄 DevenClaw is restarting, back in a moment...').catch(() => {});
+      await broadcastServiceMessage(
+        '🔄 DevenClaw is restarting, back in a moment...',
+      ).catch(() => {});
       writeRestartFlag('restart_service');
     },
     onTasksChanged: () => {
@@ -1215,7 +1240,13 @@ async function main(): Promise<void> {
     },
   });
   queue.setProcessMessagesFn(processGroupMessages);
-  setTimeout(() => checkAndSendOnlineNotification().catch((err) => logger.warn({ err }, "back-online notify failed")), 5000);
+  setTimeout(
+    () =>
+      checkAndSendOnlineNotification().catch((err) =>
+        logger.warn({ err }, 'back-online notify failed'),
+      ),
+    5000,
+  );
   recoverPendingMessages().catch((err) =>
     logger.warn({ err }, 'recoverPendingMessages failed'),
   );

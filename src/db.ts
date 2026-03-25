@@ -1073,7 +1073,10 @@ export async function getDraft(chatJid: string): Promise<string> {
   return (result.rows[0]?.content as string) || '';
 }
 
-export async function setDraft(chatJid: string, content: string): Promise<void> {
+export async function setDraft(
+  chatJid: string,
+  content: string,
+): Promise<void> {
   if (content.trim()) {
     await db.execute({
       sql: 'INSERT OR REPLACE INTO drafts (chat_jid, content, updated_at) VALUES (?, ?, ?)',

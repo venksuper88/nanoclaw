@@ -23,13 +23,10 @@ function expandAttachments(content: string, groupFolder?: string): string {
   const attachDir = path.resolve(GROUPS_DIR, groupFolder, 'attachments');
 
   // [Document: filename] or [Document: filename] caption
-  content = content.replace(
-    /\[Document: ([^\]]+)\]/g,
-    (match, filename) => {
-      const absPath = path.join(attachDir, filename.trim());
-      return `${match}\nIMPORTANT: Use the Read tool to view this file at: ${absPath}`;
-    },
-  );
+  content = content.replace(/\[Document: ([^\]]+)\]/g, (match, filename) => {
+    const absPath = path.join(attachDir, filename.trim());
+    return `${match}\nIMPORTANT: Use the Read tool to view this file at: ${absPath}`;
+  });
 
   // [Photo: filename | path:/workspace/group/attachments/filename]
   content = content.replace(

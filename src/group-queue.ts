@@ -344,7 +344,6 @@ export class GroupQueue {
     }
   }
 
-
   getActiveGroupFolders(): string[] {
     const result: string[] = [];
     for (const state of this.groups.values()) {

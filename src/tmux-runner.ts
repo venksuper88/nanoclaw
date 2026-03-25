@@ -250,7 +250,10 @@ export function ensureSession(group: RegisteredGroup, chatJid: string): void {
  * Returns events for assistant text blocks, SendMessage tool calls, and result events.
  * Uses emittedKeys set for deduplication across progressive snapshots.
  */
-function parseStreamLine(line: string, emittedKeys: Set<string>): TmuxStreamEvent[] {
+function parseStreamLine(
+  line: string,
+  emittedKeys: Set<string>,
+): TmuxStreamEvent[] {
   const events: TmuxStreamEvent[] = [];
   try {
     const event = JSON.parse(line);
@@ -265,13 +268,25 @@ function parseStreamLine(line: string, emittedKeys: Set<string>): TmuxStreamEven
             events.push({ type: 'text', content: block.text });
           }
         }
-        if (block.type === 'tool_use' && block.name === 'SendMessage' && block.input) {
-          const msg = block.input.message || block.input.content || block.input.summary || '';
+        if (
+          block.type === 'tool_use' &&
+          block.name === 'SendMessage' &&
+          block.input
+        ) {
+          const msg =
+            block.input.message ||
+            block.input.content ||
+            block.input.summary ||
+            '';
           if (msg) {
             const key = `send:${msg}`;
             if (!emittedKeys.has(key)) {
               emittedKeys.add(key);
-              events.push({ type: 'send_message', content: msg, sender: block.input.sender });
+              events.push({
+                type: 'send_message',
+                content: msg,
+                sender: block.input.sender,
+              });
             }
           }
         }
@@ -325,7 +340,11 @@ export async function runTmuxAgent(
     );
   } catch (err) {
     logger.error({ session: name, err }, 'Failed to send prompt to tmux');
-    try { fs.unlinkSync(promptFile); } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(promptFile);
+    } catch {
+      /* ignore */
+    }
     return {
       status: 'error',
       result: null,
@@ -384,8 +403,16 @@ export async function runTmuxAgent(
         // Final drain to catch any remaining stream events
         drainStreamLog();
         // Clean up stderr log and stream log on success
-        try { fs.unlinkSync(`${doneFile}.stderr`); } catch { /* ignore */ }
-        try { fs.unlinkSync(streamLogFile); } catch { /* ignore */ }
+        try {
+          fs.unlinkSync(`${doneFile}.stderr`);
+        } catch {
+          /* ignore */
+        }
+        try {
+          fs.unlinkSync(streamLogFile);
+        } catch {
+          /* ignore */
+        }
 
         // Extract session ID and result text from tmux pane output
         let newSessionId: string | undefined;
@@ -396,8 +423,13 @@ export async function runTmuxAgent(
         );
 
         // Parse the last result event from stream-json output
-        const resultLines = paneOutput.split('\n').filter((l) => l.includes('"type":"result"'));
-        logger.debug({ resultLineCount: resultLines.length }, 'Parsed result lines from pane');
+        const resultLines = paneOutput
+          .split('\n')
+          .filter((l) => l.includes('"type":"result"'));
+        logger.debug(
+          { resultLineCount: resultLines.length },
+          'Parsed result lines from pane',
+        );
         if (resultLines.length > 0) {
           try {
             const resultEvent = JSON.parse(resultLines[resultLines.length - 1]);
@@ -414,7 +446,10 @@ export async function runTmuxAgent(
         }
 
         // Only store session ID if the turn was truly successful (not auth error)
-        const isRealSuccess = data.exit_code === 0 && resultText && !resultText.includes('Not logged in');
+        const isRealSuccess =
+          data.exit_code === 0 &&
+          resultText &&
+          !resultText.includes('Not logged in');
         const output: TmuxOutput = {
           status: data.exit_code === 0 ? 'success' : 'error',
           result: resultText,
@@ -440,15 +475,27 @@ export async function runTmuxAgent(
         return output;
       } catch (err) {
         logger.warn({ err, doneFile }, 'Failed to parse done marker');
-        try { fs.unlinkSync(doneFile); } catch { /* ignore */ }
-        return { status: 'error', result: null, error: 'Failed to parse done marker' };
+        try {
+          fs.unlinkSync(doneFile);
+        } catch {
+          /* ignore */
+        }
+        return {
+          status: 'error',
+          result: null,
+          error: 'Failed to parse done marker',
+        };
       }
     }
     await new Promise((r) => setTimeout(r, DONE_POLL_MS));
   }
 
   logger.error({ session: name, nonce }, 'Tmux turn timed out');
-  return { status: 'error', result: null, error: 'Tmux turn timed out after 30 minutes' };
+  return {
+    status: 'error',
+    result: null,
+    error: 'Tmux turn timed out after 30 minutes',
+  };
 }
 
 /**

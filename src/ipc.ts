@@ -233,7 +233,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
               try {
                 const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
                 if (
-                  (data.type === 'pre_compact_writeback' || data.type === 'save_memory') &&
+                  (data.type === 'pre_compact_writeback' ||
+                    data.type === 'save_memory') &&
                   data.groupFolder &&
                   data.text
                 ) {

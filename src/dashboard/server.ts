@@ -16,7 +16,10 @@ import { createRouter } from './routes.js';
 
 const STATIC_DIR = path.resolve(process.cwd(), 'public', 'dashboard');
 
-export async function startDashboard(port: number, opts?: { getActiveGroupFolders?: () => string[] }): Promise<http.Server> {
+export async function startDashboard(
+  port: number,
+  opts?: { getActiveGroupFolders?: () => string[] },
+): Promise<http.Server> {
   const app = express();
 
   app.use(express.json());
