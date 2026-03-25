@@ -344,6 +344,16 @@ export class GroupQueue {
     }
   }
 
+  getActiveGroupFolders(): string[] {
+    const result: string[] = [];
+    for (const state of this.groups.values()) {
+      if (state.active && !state.idleWaiting && state.groupFolder) {
+        result.push(state.groupFolder);
+      }
+    }
+    return result;
+  }
+
   async shutdown(_gracePeriodMs: number): Promise<void> {
     this.shuttingDown = true;
 

@@ -30,6 +30,8 @@ export interface AllowedRoot {
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
+  dockerSocket?: boolean; // Mount Docker socket into container (main groups only)
+  projectReadWrite?: boolean; // Mount project root read-write instead of read-only (main groups only)
 }
 
 export interface RegisteredGroup {
@@ -40,6 +42,14 @@ export interface RegisteredGroup {
   containerConfig?: ContainerConfig;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
+  isTransient?: boolean; // Container closes after response instead of idling 30min. Fresh session each trigger.
+  memoryMode?: 'full' | 'local' | 'none'; // full=mem0 scoped, local=CLAUDE.md only, none=no memory
+  memoryScopes?: string[]; // which shared scope tags this group can access when memoryMode='full'
+  memoryUserId?: string; // mem0 userId for this group's private memory pool (default: 'venky')
+  showInSidebar?: boolean; // Whether to show in chat sidebar (default: true). False = only in Settings/Overview.
+  idleTimeoutMinutes?: number; // 0 = always on, null/undefined = default (30min), N = custom minutes
+  allowedSkills?: string[]; // Container skill folders to mount. Empty = all skills.
+  mode?: 'container' | 'tmux'; // Default: 'container'. 'tmux' runs claude CLI in a persistent tmux session on the host.
 }
 
 export interface NewMessage {
@@ -86,6 +96,8 @@ export interface Channel {
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
+  // Optional: send a file attachment. Channels that support it implement it.
+  sendFile?(jid: string, filePath: string, caption?: string): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.

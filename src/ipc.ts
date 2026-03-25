@@ -5,17 +5,24 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import {
+  createTask,
+  deleteTask,
+  getTaskById,
+  storeMessage,
+  updateTask,
+} from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendFile?: (jid: string, filePath: string, caption?: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
-  getAvailableGroups: () => AvailableGroup[];
+  getAvailableGroups: () => Promise<AvailableGroup[]>;
   writeGroupsSnapshot: (
     groupFolder: string,
     isMain: boolean,
@@ -24,6 +31,7 @@ export interface IpcDeps {
   ) => void;
   onTasksChanged: () => void;
   onMemoryWriteBack?: (groupFolder: string, text: string) => void;
+  onShutdown?: () => Promise<void>;
 }
 
 let ipcWatcherRunning = false;
@@ -82,7 +90,72 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  // File attachment: resolve path and validate it's within allowed directories
+                  if (data.filePath && deps.sendFile) {
+                    const groupDir = path.join(
+                      DATA_DIR,
+                      '..',
+                      'groups',
+                      sourceGroup,
+                    );
+                    // Translate container paths to host paths:
+                    // /workspace/group/... → groups/{sourceGroup}/...
+                    // /workspace/project/groups/... → groups/...
+                    let hostPath = data.filePath;
+                    if (hostPath.startsWith('/workspace/group/')) {
+                      hostPath = path.join(
+                        groupDir,
+                        hostPath.slice('/workspace/group/'.length),
+                      );
+                    } else if (
+                      hostPath.startsWith('/workspace/project/groups/')
+                    ) {
+                      hostPath = path.join(
+                        DATA_DIR,
+                        '..',
+                        'groups',
+                        hostPath.slice('/workspace/project/groups/'.length),
+                      );
+                    }
+                    const resolved = path.resolve(groupDir, hostPath);
+                    // Security: only allow files from within the group folder or /tmp
+                    if (
+                      resolved.startsWith(path.resolve(groupDir)) ||
+                      resolved.startsWith('/tmp/')
+                    ) {
+                      await deps.sendFile(
+                        data.chatJid,
+                        resolved,
+                        data.text || undefined,
+                      );
+                      logger.info(
+                        { chatJid: data.chatJid, sourceGroup, file: resolved },
+                        'IPC file sent',
+                      );
+                    } else {
+                      logger.warn(
+                        { chatJid: data.chatJid, filePath: data.filePath },
+                        'IPC file path outside allowed directory',
+                      );
+                      await deps.sendMessage(data.chatJid, data.text);
+                    }
+                  } else {
+                    await deps.sendMessage(data.chatJid, data.text);
+                  }
+                  // Persist IPC messages in DB so they survive page refresh
+                  const groupName = targetGroup?.name || sourceGroup;
+                  storeMessage({
+                    id: `ipc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                    chat_jid: data.chatJid,
+                    sender: data.sender || groupName,
+                    sender_name: data.sender || groupName,
+                    content: data.text,
+                    timestamp: data.timestamp || new Date().toISOString(),
+                    is_from_me: false,
+                    is_bot_message: true,
+                  }).catch((err) =>
+                    logger.warn({ err }, 'Failed to store IPC message'),
+                  );
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup },
                     'IPC message sent',
@@ -160,14 +233,15 @@ export function startIpcWatcher(deps: IpcDeps): void {
               try {
                 const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
                 if (
-                  data.type === 'pre_compact_writeback' &&
+                  (data.type === 'pre_compact_writeback' ||
+                    data.type === 'save_memory') &&
                   data.groupFolder &&
                   data.text
                 ) {
                   deps.onMemoryWriteBack(data.groupFolder, data.text);
-                  logger.debug(
-                    { sourceGroup },
-                    'Pre-compact memory write-back triggered',
+                  logger.info(
+                    { sourceGroup, type: data.type },
+                    'Memory write-back triggered',
                   );
                 }
                 fs.unlinkSync(filePath);
@@ -217,7 +291,10 @@ export async function processTaskIpc(
     folder?: string;
     trigger?: string;
     requiresTrigger?: boolean;
+    isTransient?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For restart_service
+    reason?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -301,7 +378,7 @@ export async function processTaskIpc(
           data.context_mode === 'group' || data.context_mode === 'isolated'
             ? data.context_mode
             : 'isolated';
-        createTask({
+        await createTask({
           id: taskId,
           group_folder: targetFolder,
           chat_jid: targetJid,
@@ -323,9 +400,9 @@ export async function processTaskIpc(
 
     case 'pause_task':
       if (data.taskId) {
-        const task = getTaskById(data.taskId);
+        const task = await getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
-          updateTask(data.taskId, { status: 'paused' });
+          await updateTask(data.taskId, { status: 'paused' });
           logger.info(
             { taskId: data.taskId, sourceGroup },
             'Task paused via IPC',
@@ -342,9 +419,9 @@ export async function processTaskIpc(
 
     case 'resume_task':
       if (data.taskId) {
-        const task = getTaskById(data.taskId);
+        const task = await getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
-          updateTask(data.taskId, { status: 'active' });
+          await updateTask(data.taskId, { status: 'active' });
           logger.info(
             { taskId: data.taskId, sourceGroup },
             'Task resumed via IPC',
@@ -361,9 +438,9 @@ export async function processTaskIpc(
 
     case 'cancel_task':
       if (data.taskId) {
-        const task = getTaskById(data.taskId);
+        const task = await getTaskById(data.taskId);
         if (task && (isMain || task.group_folder === sourceGroup)) {
-          deleteTask(data.taskId);
+          await deleteTask(data.taskId);
           logger.info(
             { taskId: data.taskId, sourceGroup },
             'Task cancelled via IPC',
@@ -380,7 +457,7 @@ export async function processTaskIpc(
 
     case 'update_task':
       if (data.taskId) {
-        const task = getTaskById(data.taskId);
+        const task = await getTaskById(data.taskId);
         if (!task) {
           logger.warn(
             { taskId: data.taskId, sourceGroup },
@@ -434,7 +511,7 @@ export async function processTaskIpc(
           }
         }
 
-        updateTask(data.taskId, updates);
+        await updateTask(data.taskId, updates);
         logger.info(
           { taskId: data.taskId, sourceGroup, updates },
           'Task updated via IPC',
@@ -452,7 +529,7 @@ export async function processTaskIpc(
         );
         await deps.syncGroups(true);
         // Write updated snapshot immediately
-        const availableGroups = deps.getAvailableGroups();
+        const availableGroups = await deps.getAvailableGroups();
         deps.writeGroupsSnapshot(
           sourceGroup,
           true,
@@ -492,6 +569,7 @@ export async function processTaskIpc(
           added_at: new Date().toISOString(),
           containerConfig: data.containerConfig,
           requiresTrigger: data.requiresTrigger,
+          isTransient: data.isTransient,
         });
       } else {
         logger.warn(
@@ -499,6 +577,32 @@ export async function processTaskIpc(
           'Invalid register_group request - missing required fields',
         );
       }
+      break;
+
+    case 'restart_service':
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized restart_service attempt blocked',
+        );
+        break;
+      }
+      logger.info(
+        { sourceGroup, reason: data.reason },
+        'Graceful restart requested via IPC',
+      );
+      // Notify all chats, then exit. launchd KeepAlive restarts automatically.
+      (async () => {
+        try {
+          await deps.onShutdown?.();
+        } catch (err) {
+          logger.warn({ err }, 'onShutdown hook failed');
+        }
+        setTimeout(() => {
+          logger.info('Exiting for restart...');
+          process.exit(0);
+        }, 1500);
+      })();
       break;
 
     default:

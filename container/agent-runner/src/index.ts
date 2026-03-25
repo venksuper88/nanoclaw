@@ -14,6 +14,7 @@
  *   Final marker after loop ends signals completion.
  */
 
+import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
@@ -27,6 +28,7 @@ interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  useCliMode?: boolean; // Use claude CLI instead of SDK query()
 }
 
 interface ContainerOutput {
@@ -491,6 +493,162 @@ async function runQuery(
   return { newSessionId, lastAssistantUuid, closedDuringQuery };
 }
 
+/**
+ * CLI-mode: spawn `claude` CLI instead of SDK query().
+ * Uses the interactive Claude Code CLI auth path (Max plan limits).
+ * Each turn is a separate `claude -p` invocation with --resume.
+ */
+async function runCliQuery(
+  prompt: string,
+  sessionId: string | undefined,
+  mcpServerPath: string,
+  containerInput: ContainerInput,
+): Promise<{ newSessionId?: string; closedDuringQuery: boolean }> {
+  // Ensure MCP server is configured in claude settings
+  const settingsPath = '/home/node/.claude/settings.json';
+  if (fs.existsSync(settingsPath)) {
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    if (!settings.mcpServers?.nanoclaw) {
+      settings.mcpServers = settings.mcpServers || {};
+      settings.mcpServers.nanoclaw = {
+        command: 'node',
+        args: [mcpServerPath],
+        env: {
+          NANOCLAW_CHAT_JID: containerInput.chatJid,
+          NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+          NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+        },
+      };
+      fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+      log('Configured MCP server in claude settings');
+    }
+  }
+
+  const args = [
+    '-p', prompt,
+    '--output-format', 'stream-json',
+    '--dangerously-skip-permissions',
+    '--verbose',
+  ];
+  if (sessionId) {
+    args.push('--resume', sessionId);
+  }
+
+  log(`CLI mode: spawning claude ${sessionId ? '(resume ' + sessionId + ')' : '(new session)'}...`);
+
+  return new Promise((resolve) => {
+    const cli = spawn('claude', args, {
+      cwd: '/workspace/group',
+      env: { ...process.env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let newSessionId: string | undefined;
+    let resultText: string | null = null;
+    let closedDuringQuery = false;
+    let buffer = '';
+
+    // Poll IPC for _close sentinel during the query
+    let ipcPolling = true;
+    const pollIpc = () => {
+      if (!ipcPolling) return;
+      if (shouldClose()) {
+        log('Close sentinel detected during CLI query, killing');
+        closedDuringQuery = true;
+        cli.kill('SIGTERM');
+        ipcPolling = false;
+        return;
+      }
+      // Follow-up messages: drain and write to a file for next turn
+      // (CLI mode doesn't support mid-turn piping)
+      setTimeout(pollIpc, IPC_POLL_MS);
+    };
+    setTimeout(pollIpc, IPC_POLL_MS);
+
+    cli.stdout.on('data', (data) => {
+      buffer += data.toString();
+      // Parse newline-delimited JSON events
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // Keep incomplete line in buffer
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+
+          // Extract session ID
+          if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
+            newSessionId = event.session_id;
+            log(`CLI session: ${newSessionId}`);
+          }
+
+          // Log tool use
+          if (event.type === 'assistant' && event.message?.content) {
+            for (const block of event.message.content) {
+              if (block.type === 'tool_use') {
+                const name = block.name || 'unknown';
+                const input = block.input ? JSON.stringify(block.input).slice(0, 100) : '';
+                log(`⚡ ${name}${input ? ': ' + input : ''}`);
+              }
+              if (block.type === 'text' && block.text) {
+                log(`[assistant] ${block.text.slice(0, 150)}`);
+              }
+            }
+          }
+
+          // Capture result
+          if (event.type === 'result') {
+            resultText = event.result || null;
+            log(`Result: ${event.subtype}${resultText ? ' text=' + resultText.slice(0, 200) : ''}`);
+            writeOutput({
+              status: 'success',
+              result: resultText,
+              newSessionId,
+            });
+          }
+        } catch {
+          // Not JSON, log raw
+          if (line.trim()) log(`[cli stdout] ${line.trim().slice(0, 200)}`);
+        }
+      }
+    });
+
+    cli.stderr.on('data', (data) => {
+      const lines = data.toString().trim().split('\n');
+      for (const line of lines) {
+        if (line.trim()) log(`[cli stderr] ${line.trim().slice(0, 200)}`);
+      }
+    });
+
+    cli.on('close', (code) => {
+      ipcPolling = false;
+      log(`CLI exited with code ${code}`);
+
+      if (!resultText && !closedDuringQuery) {
+        // CLI exited without a result event — might have crashed
+        writeOutput({
+          status: code === 0 ? 'success' : 'error',
+          result: null,
+          newSessionId,
+          error: code !== 0 ? `CLI exited with code ${code}` : undefined,
+        });
+      }
+
+      resolve({ newSessionId, closedDuringQuery });
+    });
+
+    cli.on('error', (err) => {
+      ipcPolling = false;
+      log(`CLI spawn error: ${err.message}`);
+      writeOutput({
+        status: 'error',
+        result: null,
+        error: `CLI spawn error: ${err.message}`,
+      });
+      resolve({ newSessionId: undefined, closedDuringQuery: false });
+    });
+  });
+}
+
 async function main(): Promise<void> {
   let containerInput: ContainerInput;
 
@@ -536,14 +694,17 @@ async function main(): Promise<void> {
   let resumeAt: string | undefined;
   try {
     while (true) {
-      log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
+      log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'}, mode: ${containerInput.useCliMode ? 'cli' : 'sdk'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      const queryResult = containerInput.useCliMode
+        ? await runCliQuery(prompt, sessionId, mcpServerPath, containerInput)
+        : await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
-      if (queryResult.lastAssistantUuid) {
-        resumeAt = queryResult.lastAssistantUuid;
+      const asFullResult = queryResult as { lastAssistantUuid?: string };
+      if (asFullResult.lastAssistantUuid) {
+        resumeAt = asFullResult.lastAssistantUuid;
       }
 
       // If _close was consumed during the query, exit immediately.

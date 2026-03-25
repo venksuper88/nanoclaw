@@ -11,7 +11,8 @@ When responding to Slack channels, use Slack's mrkdwn syntax instead of standard
 
 Check your group folder name or workspace path:
 - Folder starts with `slack_` (e.g., `slack_engineering`, `slack_general`)
-- Or check `/workspace/group/` path for `slack_` prefix
+- Or check your working directory path for `slack_` prefix
+- Or check `$NANOCLAW_GROUP_FOLDER` env var
 
 ## Formatting reference
 

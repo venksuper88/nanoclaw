@@ -7,94 +7,78 @@ description: Show what this NanoClaw instance can do — installed skills, avail
 
 Generate a structured read-only report of what this NanoClaw instance can do.
 
-**Main-channel check:** Only the main channel has `/workspace/project` mounted. Run:
-
-```bash
-test -d /workspace/project && echo "MAIN" || echo "NOT_MAIN"
-```
-
-If `NOT_MAIN`, respond with:
-> This command is available in your main chat only. Send `/capabilities` there to see what I can do.
-
-Then stop — do not generate the report.
-
 ## How to gather the information
-
-Run these commands and compile the results into the report format below.
 
 ### 1. Installed skills
 
 List skill directories available to you:
 
 ```bash
-ls -1 /home/node/.claude/skills/ 2>/dev/null || echo "No skills found"
+# tmux mode: skills are in the project .claude/skills/
+# container mode: skills are in /home/node/.claude/skills/
+ls -1 .claude/skills/ 2>/dev/null || ls -1 /home/node/.claude/skills/ 2>/dev/null || echo "No skills found"
 ```
-
-Each directory is an installed skill. The directory name is the skill name (e.g., `agent-browser` → `/agent-browser`).
 
 ### 2. Available tools
 
-Read the allowed tools from your SDK configuration. You always have access to:
 - **Core:** Bash, Read, Write, Edit, Glob, Grep
 - **Web:** WebSearch, WebFetch
 - **Orchestration:** Task, TaskOutput, TaskStop, TeamCreate, TeamDelete, SendMessage
 - **Other:** TodoWrite, ToolSearch, Skill, NotebookEdit
-- **MCP:** mcp__nanoclaw__* (messaging, tasks, group management)
+- **MCP:** mcp__nanoclaw__* (messaging, tasks, memory, group management)
 
 ### 3. MCP server tools
 
-The NanoClaw MCP server exposes these tools (via `mcp__nanoclaw__*` prefix):
+The NanoClaw MCP server exposes:
 - `send_message` — send a message to the user/group
+- `send_file` — send a file attachment
+- `save_memory` — save a fact to long-term memory (mem0)
 - `schedule_task` — schedule a recurring or one-time task
 - `list_tasks` — list scheduled tasks
-- `pause_task` — pause a scheduled task
-- `resume_task` — resume a paused task
-- `cancel_task` — cancel and delete a task
-- `update_task` — update an existing task
+- `pause_task` / `resume_task` / `cancel_task` / `update_task` — manage tasks
 - `register_group` — register a new chat/group (main only)
 
-### 4. Container skills (Bash tools)
-
-Check for executable tools in the container:
+### 4. Runtime tools
 
 ```bash
 which agent-browser 2>/dev/null && echo "agent-browser: available" || echo "agent-browser: not found"
+node --version 2>/dev/null
+claude --version 2>/dev/null || claude-lts --version 2>/dev/null
 ```
 
-### 5. Group info
+### 5. Environment info
 
 ```bash
-ls /workspace/group/CLAUDE.md 2>/dev/null && echo "Group memory: yes" || echo "Group memory: no"
-ls /workspace/extra/ 2>/dev/null && echo "Extra mounts: $(ls /workspace/extra/ 2>/dev/null | wc -l | tr -d ' ')" || echo "Extra mounts: none"
+echo "Mode: ${NANOCLAW_IPC_DIR:+tmux}${NANOCLAW_IPC_DIR:-container}"
+echo "Group: ${NANOCLAW_GROUP_FOLDER:-unknown}"
+echo "Main: ${NANOCLAW_IS_MAIN:-0}"
+ls CLAUDE.md 2>/dev/null && echo "Group memory: yes" || echo "Group memory: no"
 ```
 
 ## Report format
 
-Present the report as a clean, readable message. Example:
-
 ```
-📋 *NanoClaw Capabilities*
+📋 *Capabilities*
 
-*Installed Skills:*
+*Skills:*
 • /agent-browser — Browse the web, fill forms, extract data
 • /capabilities — This report
-(list all found skills)
+• /restart — Restart the service
+• /status — Health check
+(list all found)
 
 *Tools:*
 • Core: Bash, Read, Write, Edit, Glob, Grep
 • Web: WebSearch, WebFetch
 • Orchestration: Task, TeamCreate, SendMessage
-• MCP: send_message, schedule_task, list_tasks, pause/resume/cancel/update_task, register_group
+• MCP: send_message, save_memory, schedule_task, list_tasks, register_group
 
-*Container Tools:*
-• agent-browser: ✓
-
-*System:*
+*Runtime:*
+• Mode: tmux / container
 • Group memory: yes/no
-• Extra mounts: N directories
-• Main channel: yes
+• Main group: yes/no
 ```
 
-Adapt the output based on what you actually find — don't list things that aren't installed.
+Adapt based on what you find. Don't list things that aren't installed.
 
-**See also:** `/status` for a quick health check of session, workspace, and tasks.
+**See also:** `/status` for a quick health check.
