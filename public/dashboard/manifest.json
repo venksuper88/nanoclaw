@@ -1,0 +1,21 @@
+{
+  "name": "DevenClaw",
+  "short_name": "DevenClaw",
+  "description": "DevenClaw \u2014 Your personal AI assistant",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F3F0F8",
+  "theme_color": "#6C3CE1",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

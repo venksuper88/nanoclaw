@@ -11,7 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
-const IPC_DIR = '/workspace/ipc';
+const IPC_DIR = process.env.NANOCLAW_IPC_DIR || '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 
@@ -329,6 +329,40 @@ Use available_groups.json to find the JID for a group. The folder name must be c
 
     return {
       content: [{ type: 'text' as const, text: `Group "${args.name}" registered. It will start receiving messages immediately.` }],
+    };
+  },
+);
+
+server.tool(
+  'save_memory',
+  `Save an important fact or preference to long-term memory. Use this when you learn something worth remembering for future conversations — user preferences, project decisions, key facts, or important context.
+
+Do NOT save:
+- Trivial or temporary information
+- Things already in CLAUDE.md or code
+- Raw code snippets or file contents
+
+Good examples:
+- "User prefers mobile-first design with Manrope/Inter fonts"
+- "Turso DB migration completed, using libsql client"
+- "BuildPo should never restart the service without asking"`,
+  {
+    text: z.string().describe('The fact or preference to remember. Be concise and specific.'),
+  },
+  async (args) => {
+    const data = {
+      type: 'save_memory',
+      groupFolder,
+      text: args.text,
+      timestamp: new Date().toISOString(),
+    };
+
+    const memoryDir = path.join(IPC_DIR, 'memory');
+    fs.mkdirSync(memoryDir, { recursive: true });
+    writeIpcFile(memoryDir, data);
+
+    return {
+      content: [{ type: 'text' as const, text: 'Memory saved.' }],
     };
   },
 );

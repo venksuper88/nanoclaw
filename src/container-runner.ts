@@ -15,6 +15,7 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   TIMEZONE,
+  TRANSIENT_CLOSE_DELAY_MS,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
@@ -41,6 +42,7 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  useCliMode?: boolean;
 }
 
 export interface ContainerOutput {
@@ -65,15 +67,13 @@ function buildVolumeMounts(
   const groupDir = resolveGroupFolderPath(group.folder);
 
   if (isMain) {
-    // Main gets the project root read-only. Writable paths the agent needs
-    // (group folder, IPC, .claude/) are mounted separately below.
-    // Read-only prevents the agent from modifying host application code
-    // (src/, dist/, package.json, etc.) which would bypass the sandbox
-    // entirely on next restart.
+    // Main gets project root. Read-only by default to prevent agents from
+    // modifying host code. projectReadWrite enables direct editing for dev agents.
+    const projectRW = group.containerConfig?.projectReadWrite === true;
     mounts.push({
       hostPath: projectRoot,
       containerPath: '/workspace/project',
-      readonly: true,
+      readonly: !projectRW,
     });
 
     // Shadow .env so the agent cannot read secrets from the mounted project root.
@@ -93,6 +93,17 @@ function buildVolumeMounts(
       containerPath: '/workspace/group',
       readonly: false,
     });
+
+    // Global memory directory (read-write for main — can update documents.json etc.)
+    // Mounted separately to override the read-only project root mount above.
+    const mainGlobalDir = path.join(GROUPS_DIR, 'global');
+    if (fs.existsSync(mainGlobalDir)) {
+      mounts.push({
+        hostPath: mainGlobalDir,
+        containerPath: '/workspace/global',
+        readonly: false,
+      });
+    }
   } else {
     // Other groups only get their own folder
     mounts.push({
@@ -111,6 +122,20 @@ function buildVolumeMounts(
         readonly: true,
       });
     }
+  }
+
+  // Mount rclone config (read-only) so containers can access cloud storage
+  const rcloneConfigDir = path.join(
+    process.env.HOME || require('os').homedir(),
+    '.config',
+    'rclone',
+  );
+  if (fs.existsSync(rcloneConfigDir)) {
+    mounts.push({
+      hostPath: rcloneConfigDir,
+      containerPath: '/workspace/extra/rclone-config',
+      readonly: true,
+    });
   }
 
   // Per-group Claude sessions directory (isolated from other groups)
@@ -147,12 +172,26 @@ function buildVolumeMounts(
   }
 
   // Sync skills from container/skills/ into each group's .claude/skills/
+  // If allowedSkills is set, only mount those specific skills.
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');
+  // Clean old skills so removed skills don't persist
+  if (fs.existsSync(skillsDst)) {
+    fs.rmSync(skillsDst, { recursive: true, force: true });
+  }
   if (fs.existsSync(skillsSrc)) {
+    const allowedSkills = group.allowedSkills;
     for (const skillDir of fs.readdirSync(skillsSrc)) {
       const srcDir = path.join(skillsSrc, skillDir);
       if (!fs.statSync(srcDir).isDirectory()) continue;
+      // If allowedSkills is set and non-empty, only copy listed skills
+      if (
+        allowedSkills &&
+        allowedSkills.length > 0 &&
+        !allowedSkills.includes(skillDir)
+      ) {
+        continue;
+      }
       const dstDir = path.join(skillsDst, skillDir);
       fs.cpSync(srcDir, dstDir, { recursive: true });
     }
@@ -190,14 +229,30 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+  if (fs.existsSync(agentRunnerSrc)) {
+    // Always sync from source — ensures container gets latest agent-runner code
+    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, {
+      recursive: true,
+      force: true,
+    });
   }
   mounts.push({
     hostPath: groupAgentRunnerDir,
     containerPath: '/app/src',
     readonly: false,
   });
+
+  // Mount Docker socket for main groups so they can inspect/debug other containers
+  if (isMain && group.containerConfig?.dockerSocket) {
+    const dockerSock = '/var/run/docker.sock';
+    if (fs.existsSync(dockerSock)) {
+      mounts.push({
+        hostPath: dockerSock,
+        containerPath: '/var/run/docker.sock',
+        readonly: false,
+      });
+    }
+  }
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
@@ -269,6 +324,7 @@ export async function runContainerAgent(
   input: ContainerInput,
   onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  onLogLine?: (line: string, stream: 'stdout' | 'stderr') => void,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
@@ -344,6 +400,17 @@ export async function runContainerAgent(
         }
       }
 
+      // Emit non-marker stdout lines for live log streaming
+      if (onLogLine) {
+        const lines = chunk.split('\n');
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed && !trimmed.includes('---NANOCLAW_OUTPUT_')) {
+            onLogLine(trimmed, 'stdout');
+          }
+        }
+      }
+
       // Stream-parse for output markers
       if (onOutput) {
         parseBuffer += chunk;
@@ -382,7 +449,10 @@ export async function runContainerAgent(
       const chunk = data.toString();
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
-        if (line) logger.debug({ container: group.folder }, line);
+        if (line) {
+          logger.debug({ container: group.folder }, line);
+          if (onLogLine) onLogLine(line, 'stderr');
+        }
       }
       // Don't reset timeout on stderr — SDK writes debug logs continuously.
       // Timeout only resets on actual output (OUTPUT_MARKER in stdout).
@@ -403,9 +473,12 @@ export async function runContainerAgent(
     let timedOut = false;
     let hadStreamingOutput = false;
     const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
-    // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
+    // Grace period: hard timeout must be at least the close delay + 30s so the
     // graceful _close sentinel has time to trigger before the hard kill fires.
-    const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
+    const closeDelay = group.isTransient
+      ? TRANSIENT_CLOSE_DELAY_MS
+      : IDLE_TIMEOUT;
+    const timeoutMs = Math.max(configTimeout, closeDelay + 30_000);
 
     const killOnTimeout = () => {
       timedOut = true;
