@@ -1,11 +1,11 @@
 ---
 name: capabilities
-description: Show what this NanoClaw instance can do — installed skills, available tools, and system info. Read-only. Use when the user asks what the bot can do, what's installed, or runs /capabilities.
+description: Show what this DevenClaw instance can do — installed skills, available tools, and system info. Read-only. Use when the user asks what the bot can do, what's installed, or runs /capabilities.
 ---
 
 # /capabilities — System Capabilities Report
 
-Generate a structured read-only report of what this NanoClaw instance can do.
+Generate a structured read-only report of what this DevenClaw instance can do.
 
 ## How to gather the information
 
@@ -29,7 +29,7 @@ ls -1 .claude/skills/ 2>/dev/null || ls -1 /home/node/.claude/skills/ 2>/dev/nul
 
 ### 3. MCP server tools
 
-The NanoClaw MCP server exposes:
+The DevenClaw MCP server exposes:
 - `send_message` — send a message to the user/group
 - `send_file` — send a file attachment
 - `save_memory` — save a fact to long-term memory (mem0)

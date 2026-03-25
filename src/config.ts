@@ -13,6 +13,13 @@ const envConfig = readEnvFile([
   'MEMORY_ENABLED',
   'MEMORY_LLM_MODEL',
   'MEMORY_EMBED_MODEL',
+  'DASHBOARD_PORT',
+  'DASHBOARD_TOKEN',
+  'TURSO_DATABASE_URL',
+  'TURSO_AUTH_TOKEN',
+  'VAPID_PUBLIC_KEY',
+  'VAPID_PRIVATE_KEY',
+  'VAPID_EMAIL',
 ]);
 
 export const ASSISTANT_NAME =
@@ -60,6 +67,10 @@ export const CREDENTIAL_PROXY_PORT = parseInt(
 );
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
+export const TRANSIENT_CLOSE_DELAY_MS = parseInt(
+  process.env.TRANSIENT_CLOSE_DELAY_MS || '30000',
+  10,
+); // 30s default — how long to keep transient container alive after last activity
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
@@ -92,3 +103,25 @@ export const MEMORY_EMBED_MODEL =
   process.env.MEMORY_EMBED_MODEL ||
   envConfig.MEMORY_EMBED_MODEL ||
   'nomic-embed-text';
+
+// Dashboard
+export const DASHBOARD_PORT = parseInt(
+  process.env.DASHBOARD_PORT || envConfig.DASHBOARD_PORT || '3002',
+  10,
+);
+export const DASHBOARD_TOKEN =
+  process.env.DASHBOARD_TOKEN || envConfig.DASHBOARD_TOKEN || '';
+
+// Turso (cloud SQLite)
+export const TURSO_DATABASE_URL =
+  process.env.TURSO_DATABASE_URL || envConfig.TURSO_DATABASE_URL || '';
+export const TURSO_AUTH_TOKEN =
+  process.env.TURSO_AUTH_TOKEN || envConfig.TURSO_AUTH_TOKEN || '';
+
+// Web Push (VAPID)
+export const VAPID_PUBLIC_KEY =
+  process.env.VAPID_PUBLIC_KEY || envConfig.VAPID_PUBLIC_KEY || '';
+export const VAPID_PRIVATE_KEY =
+  process.env.VAPID_PRIVATE_KEY || envConfig.VAPID_PRIVATE_KEY || '';
+export const VAPID_EMAIL =
+  process.env.VAPID_EMAIL || envConfig.VAPID_EMAIL || '';

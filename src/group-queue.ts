@@ -25,6 +25,7 @@ interface GroupState {
   containerName: string | null;
   groupFolder: string | null;
   retryCount: number;
+  transientTimer: ReturnType<typeof setTimeout> | null;
 }
 
 export class GroupQueue {
@@ -49,6 +50,7 @@ export class GroupQueue {
         containerName: null,
         groupFolder: null,
         retryCount: 0,
+        transientTimer: null,
       };
       this.groups.set(groupJid, state);
     }
@@ -151,6 +153,20 @@ export class GroupQueue {
     if (state.pendingTasks.length > 0) {
       this.closeStdin(groupJid);
     }
+  }
+
+  /**
+   * Set (or reset) a transient close timer for a group.
+   * After delayMs, the container's stdin is closed to wind it down.
+   */
+  setTransientTimer(groupJid: string, delayMs: number): void {
+    const state = this.getGroup(groupJid);
+    if (state.transientTimer) clearTimeout(state.transientTimer);
+    state.transientTimer = setTimeout(() => {
+      state.transientTimer = null;
+      logger.debug({ groupJid, delayMs }, 'Transient timer expired, closing stdin');
+      this.closeStdin(groupJid);
+    }, delayMs);
   }
 
   /**

@@ -1,5 +1,5 @@
 /**
- * Stdio MCP Server for NanoClaw
+ * Stdio MCP Server for DevenClaw
  * Standalone process that agent teams subagents can inherit.
  * Reads context from environment variables, writes IPC files for the host.
  */

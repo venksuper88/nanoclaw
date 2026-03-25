@@ -69,7 +69,7 @@ export const api = {
     request<ApiResponse<{ uptime: number; assistantName: string; groupCount: number; taskCount: number; activeTasks: number; sessionCount: number }>>('/api/status'),
 
   getGroups: () =>
-    request<ApiResponse<Array<{ jid: string; name: string; folder: string; channel: string; lastActivity: string; isMain: boolean; isTransient: boolean; requiresTrigger: boolean; hasSession: boolean }>>>('/api/groups'),
+    request<ApiResponse<Array<{ jid: string; name: string; folder: string; channel: string; lastActivity: string; isMain: boolean; isTransient: boolean; requiresTrigger: boolean; hasSession: boolean; showInSidebar: boolean }>>>('/api/groups'),
 
   getMessages: (jid: string, limit = 50) =>
     request<ApiResponse<Array<{ id: string; sender: string; senderName: string; content: string; timestamp: string; isFromMe: boolean; isBotMessage: boolean }>>>(`/api/groups/${encodeURIComponent(jid)}/messages?limit=${limit}`),

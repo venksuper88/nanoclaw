@@ -1,11 +1,11 @@
 ---
 name: restart
-description: Gracefully restart the NanoClaw service. Main group only. Use when the user asks to restart, or after deploying code changes.
+description: Gracefully restart the DevenClaw service. Main group only. Use when the user asks to restart, or after deploying code changes.
 ---
 
-# /restart — Restart NanoClaw
+# /restart — Restart DevenClaw
 
-Gracefully restarts the NanoClaw service. All running containers will be stopped and the process will exit, then launchd restarts it automatically.
+Gracefully restarts the DevenClaw service. All running containers will be stopped and the process will exit, then launchd restarts it automatically.
 
 ## How to restart
 
@@ -23,6 +23,6 @@ echo "Restart requested"
 
 Then respond:
 
-> Restarting NanoClaw... Service will be back in a few seconds.
+> Restarting DevenClaw... Service will be back in a few seconds.
 
 **Do NOT use launchctl or kill commands.** The IPC handler manages the restart gracefully.

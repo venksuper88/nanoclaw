@@ -745,36 +745,6 @@ body {
 
 .message-meta { display: none; } /* Replaced by msg-header */
 
-/* Live terminal output box */
-.terminal-box {
-  margin: 0 16px 8px;
-  background: #15112b;
-  border-radius: 12px;
-  overflow: hidden;
-  border: 1px solid rgba(108, 60, 225, 0.25);
-}
-
-.terminal-lines {
-  padding: 10px 12px;
-  max-height: 130px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  -webkit-overflow-scrolling: touch;
-}
-
-.terminal-line {
-  font-family: 'JetBrains Mono', 'SF Mono', monospace;
-  font-size: 11px;
-  line-height: 1.5;
-  color: #9d8ec7;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
-.terminal-line:last-child {
-  color: #c4b5e3;
-}
-
 .typing-indicator {
   padding: 8px 16px 12px 64px;
   display: flex;
@@ -1218,3 +1188,326 @@ select {
 }
 
 ::-webkit-scrollbar { width: 0; background: transparent; }
+
+/* ══════════════════════════════
+   OVERVIEW VIEW
+   ══════════════════════════════ */
+.overview-view {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 20px;
+}
+
+.overview-stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  padding: 16px 16px 8px;
+}
+
+.overview-section {
+  padding: 8px 16px;
+}
+
+.overview-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 4px 8px;
+}
+
+.overview-section-header h3 {
+  font-family: 'Manrope', sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.overview-refresh {
+  background: none;
+  border: none;
+  color: var(--text2);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 9999px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.overview-refresh:active { background: var(--purple-pale); }
+
+.overview-agents {
+  background: var(--surface);
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid var(--separator);
+}
+
+.overview-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  position: relative;
+}
+
+.overview-agent-row:active { background: var(--purple-pale); }
+
+.overview-agent-row:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  bottom: 0; left: 16px; right: 16px;
+  height: 1px;
+  background: var(--separator);
+  opacity: 0.5;
+}
+
+.overview-agent-avatar {
+  width: 36px; height: 36px;
+  border-radius: 12px;
+  background: var(--purple-light);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--purple);
+  position: relative;
+  flex-shrink: 0;
+}
+
+.overview-agent-dot {
+  position: absolute;
+  bottom: -1px; right: -1px;
+  width: 10px; height: 10px;
+  border-radius: 5px;
+  background: var(--green);
+  border: 2px solid var(--surface);
+}
+
+.overview-agent-info { flex: 1; min-width: 0; }
+
+.overview-agent-name {
+  font-family: 'Manrope', sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.overview-agent-meta {
+  font-size: 12px;
+  color: var(--text2);
+  margin-top: 2px;
+}
+
+/* ══════════════════════════════
+   TASKS VIEW
+   ══════════════════════════════ */
+.tasks-view {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 20px;
+}
+
+.tasks-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px 8px;
+}
+
+.tasks-header h3 {
+  font-family: 'Manrope', sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.tasks-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 60px 20px;
+  color: var(--text2);
+  font-size: 14px;
+}
+
+.tasks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 16px;
+}
+
+.task-card {
+  background: var(--surface);
+  border-radius: 16px;
+  padding: 16px;
+  border: 1px solid var(--separator);
+}
+
+.task-card.paused { opacity: 0.6; }
+
+.task-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.task-status-dot {
+  width: 8px; height: 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.task-status-dot.active { background: var(--green); }
+.task-status-dot.paused { background: var(--orange); }
+.task-status-dot.error { background: var(--error); }
+
+.task-group {
+  font-family: 'Manrope', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.task-schedule {
+  font-size: 11px;
+  color: var(--text2);
+  margin-left: auto;
+}
+
+.task-prompt {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.4;
+  margin-bottom: 8px;
+}
+
+.task-meta {
+  display: flex;
+  gap: 16px;
+  font-size: 11px;
+  color: var(--text2);
+}
+
+.task-result {
+  font-size: 11px;
+  color: var(--text2);
+  background: var(--surface-alt);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-top: 8px;
+  line-height: 1.4;
+  max-height: 60px;
+  overflow: hidden;
+}
+
+.task-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.task-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border: 1px solid var(--separator);
+  border-radius: 9999px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: 'Inter', sans-serif;
+  font-size: 12px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.task-toggle:active { background: var(--purple-pale); }
+
+/* ══════════════════════════════
+   SKILLS VIEW
+   ══════════════════════════════ */
+.skills-view {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 20px;
+}
+
+.skills-header {
+  padding: 16px 20px 8px;
+}
+
+.skills-header h3 {
+  font-family: 'Manrope', sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.skills-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 16px;
+}
+
+.skill-card {
+  display: flex;
+  gap: 12px;
+  background: var(--surface);
+  border-radius: 16px;
+  padding: 16px;
+  border: 1px solid var(--separator);
+}
+
+.skill-icon {
+  width: 40px; height: 40px;
+  border-radius: 12px;
+  background: var(--purple-light);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--purple);
+  flex-shrink: 0;
+}
+
+.skill-info { flex: 1; min-width: 0; }
+
+.skill-name {
+  font-family: 'Manrope', sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.skill-desc {
+  font-size: 12px;
+  color: var(--text2);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+.skill-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.skill-type-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: var(--purple-light);
+  color: var(--purple);
+}
+
+.skill-folder {
+  font-size: 11px;
+  color: var(--text3);
+  font-family: monospace;
+}

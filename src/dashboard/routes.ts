@@ -528,27 +528,43 @@ export function createRouter(): Router {
         return;
       }
 
-      const sessions = await getAllSessions();
-      const sessionId = sessions[group.folder];
-      if (!sessionId) {
-        res.json({ ok: true, data: { percent: 0, sizeKB: 0 } });
-        return;
-      }
-
-      const transcriptFile = path.join(
-        path.resolve(
-          process.cwd(),
-          'data',
-          'sessions',
-          group.folder,
-          '.claude',
-          'projects',
-          '-workspace-group',
-        ),
-        `${sessionId}.jsonl`,
+      const transcriptDir = path.resolve(
+        process.cwd(),
+        'data',
+        'sessions',
+        group.folder,
+        '.claude',
+        'projects',
+        '-workspace-group',
       );
 
-      if (!fs.existsSync(transcriptFile)) {
+      // Find transcript file: try session ID from DB first, fall back to most recent .jsonl
+      let transcriptFile = '';
+      const sessions = await getAllSessions();
+      const sessionId = sessions[group.folder];
+      if (sessionId) {
+        const candidate = path.join(transcriptDir, `${sessionId}.jsonl`);
+        if (fs.existsSync(candidate)) transcriptFile = candidate;
+      }
+      if (!transcriptFile && fs.existsSync(transcriptDir)) {
+        // Session ID stale — find the most recently modified .jsonl
+        const jsonlFiles = fs
+          .readdirSync(transcriptDir)
+          .filter((f) => f.endsWith('.jsonl'));
+        if (jsonlFiles.length > 0) {
+          let newest = jsonlFiles[0];
+          let newestMtime = 0;
+          for (const f of jsonlFiles) {
+            const mt = fs.statSync(path.join(transcriptDir, f)).mtimeMs;
+            if (mt > newestMtime) {
+              newestMtime = mt;
+              newest = f;
+            }
+          }
+          transcriptFile = path.join(transcriptDir, newest);
+        }
+      }
+      if (!transcriptFile) {
         res.json({ ok: true, data: { percent: 0, sizeKB: 0 } });
         return;
       }
@@ -696,6 +712,7 @@ export function createRouter(): Router {
         showInSidebar,
         idleTimeoutMinutes,
         allowedSkills,
+        mode,
       } = req.body;
       const updated = { ...group };
       if (memoryMode !== undefined) updated.memoryMode = memoryMode;
@@ -706,6 +723,8 @@ export function createRouter(): Router {
       if (idleTimeoutMinutes !== undefined)
         updated.idleTimeoutMinutes = idleTimeoutMinutes;
       if (allowedSkills !== undefined) updated.allowedSkills = allowedSkills;
+      if (mode !== undefined && (mode === 'container' || mode === 'tmux'))
+        updated.mode = mode;
 
       await setRegisteredGroup(jid, updated);
       res.json({

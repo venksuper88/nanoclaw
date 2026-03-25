@@ -1,8 +1,8 @@
 /**
- * Tmux Runner for NanoClaw
+ * Tmux Runner for DevenClaw
  *
  * Manages persistent tmux sessions that run `claude-lts -p` per turn.
- * The tmux session stays alive between turns (survives NanoClaw restarts).
+ * The tmux session stays alive between turns (survives DevenClaw restarts).
  * Each turn spawns a `claude-lts -p` invocation that exits when done.
  *
  * Message flow:
@@ -46,7 +46,7 @@ export interface TmuxOutput {
 }
 
 export interface TmuxStreamEvent {
-  type: 'text' | 'send_message';
+  type: 'text' | 'send_message' | 'activity';
   content: string;
   sender?: string;
 }
@@ -268,28 +268,64 @@ function parseStreamLine(
             events.push({ type: 'text', content: block.text });
           }
         }
-        if (
-          block.type === 'tool_use' &&
-          block.name === 'SendMessage' &&
-          block.input
-        ) {
-          const msg =
-            block.input.message ||
-            block.input.content ||
-            block.input.summary ||
-            '';
-          if (msg) {
-            const key = `send:${msg}`;
-            if (!emittedKeys.has(key)) {
-              emittedKeys.add(key);
-              events.push({
-                type: 'send_message',
-                content: msg,
-                sender: block.input.sender,
-              });
+        if (block.type === 'tool_use' && block.name && block.id) {
+          if (block.name === 'SendMessage' && block.input) {
+            const msg =
+              block.input.message ||
+              block.input.content ||
+              block.input.summary ||
+              '';
+            if (msg) {
+              const key = `send:${msg}`;
+              if (!emittedKeys.has(key)) {
+                emittedKeys.add(key);
+                events.push({
+                  type: 'send_message',
+                  content: msg,
+                  sender: block.input.sender,
+                });
+              }
             }
           }
+          // Emit activity for ALL tool calls (visibility into what agent is doing)
+          const actKey = `tool:${block.id}`;
+          if (!emittedKeys.has(actKey)) {
+            emittedKeys.add(actKey);
+            let summary = `\u2192 ${block.name}`;
+            if (block.input) {
+              if (block.name === 'Read' && block.input.file_path) {
+                summary += ` ${block.input.file_path}`;
+              } else if (block.name === 'Edit' && block.input.file_path) {
+                summary += ` ${block.input.file_path}`;
+              } else if (block.name === 'Write' && block.input.file_path) {
+                summary += ` ${block.input.file_path}`;
+              } else if (block.name === 'Bash' && block.input.command) {
+                summary += ` $ ${block.input.command.slice(0, 80)}`;
+              } else if (block.name === 'Glob' && block.input.pattern) {
+                summary += ` ${block.input.pattern}`;
+              } else if (block.name === 'Grep' && block.input.pattern) {
+                summary += ` /${block.input.pattern}/`;
+              } else if (block.name === 'Agent' && block.input.description) {
+                summary += ` ${block.input.description}`;
+              } else if (block.name === 'Skill' && block.input.skill) {
+                summary += ` /${block.input.skill}`;
+              }
+            }
+            events.push({ type: 'activity', content: summary });
+          }
         }
+      }
+    }
+
+    // Handle tool_result events — show errors in activity stream
+    if (event.type === 'tool_result' && event.is_error && event.content) {
+      const errText = typeof event.content === 'string'
+        ? event.content
+        : JSON.stringify(event.content);
+      const key = `err:${errText.slice(0, 200)}`;
+      if (!emittedKeys.has(key)) {
+        emittedKeys.add(key);
+        events.push({ type: 'activity', content: `\u2717 Error: ${errText.slice(0, 200)}` });
       }
     }
 
@@ -367,7 +403,8 @@ export async function runTmuxAgent(
         fs.closeSync(fd);
         return;
       }
-      const buf = Buffer.alloc(stat.size - streamOffset);
+      const newBytes = stat.size - streamOffset;
+      const buf = Buffer.alloc(newBytes);
       fs.readSync(fd, buf, 0, buf.length, streamOffset);
       fs.closeSync(fd);
       streamOffset = stat.size;
@@ -377,16 +414,30 @@ export async function runTmuxAgent(
       // Last element may be incomplete — buffer it
       streamBuffer = lines.pop() || '';
 
+      logger.info(
+        { newBytes, lineCount: lines.length, streamLogFile },
+        'drainStreamLog: read new data',
+      );
+
+      let emittedCount = 0;
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
         const events = parseStreamLine(trimmed, emittedKeys);
         for (const evt of events) {
+          emittedCount++;
+          logger.info(
+            { type: evt.type, contentPreview: evt.content?.slice(0, 80) },
+            'drainStreamLog: emitting stream event',
+          );
           onStreamEvent(evt);
         }
       }
+      if (emittedCount > 0) {
+        logger.info({ emittedCount }, 'drainStreamLog: emitted events');
+      }
     } catch (err) {
-      logger.debug({ err }, 'Error reading stream log');
+      logger.error({ err, streamLogFile, streamOffset }, 'Error reading stream log');
     }
   }
 

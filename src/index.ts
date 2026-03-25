@@ -300,7 +300,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         await channel?.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
-      // Emit context usage estimate after each output
+      // Emit context usage from real token counts after each output
       try {
         const transcriptDir = path.join(
           DATA_DIR,
@@ -310,42 +310,65 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           'projects',
           '-workspace-group',
         );
-        const sid = sessions[group.folder];
-        if (sid && fs.existsSync(transcriptDir)) {
-          const transcriptFile = path.join(transcriptDir, `${sid}.jsonl`);
-          if (fs.existsSync(transcriptFile)) {
-            const content = fs.readFileSync(transcriptFile, 'utf-8');
-            const lines = content.split('\n').filter((l) => l.trim());
-            let activeStartIdx = 0;
-            for (let i = lines.length - 1; i >= 0; i--) {
-              if (
-                lines[i].includes('"subtype":"init"') &&
-                lines[i].includes('"session_id"')
-              ) {
-                activeStartIdx = i;
+        if (fs.existsSync(transcriptDir)) {
+          // Find transcript: try session ID first, fall back to most recent .jsonl
+          let transcriptFile = '';
+          const sid = sessions[group.folder];
+          if (sid) {
+            const candidate = path.join(transcriptDir, `${sid}.jsonl`);
+            if (fs.existsSync(candidate)) transcriptFile = candidate;
+          }
+          if (!transcriptFile) {
+            const jsonlFiles = fs
+              .readdirSync(transcriptDir)
+              .filter((f) => f.endsWith('.jsonl'));
+            let newestMtime = 0;
+            for (const f of jsonlFiles) {
+              const mt = fs.statSync(path.join(transcriptDir, f)).mtimeMs;
+              if (mt > newestMtime) {
+                newestMtime = mt;
+                transcriptFile = path.join(transcriptDir, f);
+              }
+            }
+          }
+          if (transcriptFile) {
+            // Read tail for token usage (matches API calculation)
+            const stat = fs.statSync(transcriptFile);
+            const TAIL_READ = Math.min(stat.size, 512 * 1024);
+            const buf = Buffer.alloc(TAIL_READ);
+            const fd = fs.openSync(transcriptFile, 'r');
+            fs.readSync(fd, buf, 0, TAIL_READ, stat.size - TAIL_READ);
+            fs.closeSync(fd);
+            const tail = buf.toString('utf-8');
+            const tailLines = tail.split('\n');
+            let totalTokens = 0;
+            for (let i = tailLines.length - 1; i >= 0; i--) {
+              const line = tailLines[i];
+              if (!line.includes('"usage"')) continue;
+              const inp = line.match(/"input_tokens":(\d+)/);
+              const cc = line.match(/"cache_creation_input_tokens":(\d+)/);
+              const cr = line.match(/"cache_read_input_tokens":(\d+)/);
+              if (inp || cc || cr) {
+                totalTokens =
+                  (inp ? parseInt(inp[1], 10) : 0) +
+                  (cc ? parseInt(cc[1], 10) : 0) +
+                  (cr ? parseInt(cr[1], 10) : 0);
                 break;
               }
             }
-            let activeBytes = 0;
-            for (let i = activeStartIdx; i < lines.length; i++) {
-              if (
-                lines[i].includes('"type":"user"') ||
-                lines[i].includes('"type":"assistant"') ||
-                lines[i].includes('"type":"result"')
-              ) {
-                activeBytes += Buffer.byteLength(lines[i]);
-              }
+            if (totalTokens > 0) {
+              const MAX_CONTEXT = 1_000_000;
+              const percent = Math.min(
+                99,
+                Math.round((totalTokens / MAX_CONTEXT) * 100),
+              );
+              const sizeKB = Math.round((totalTokens * 4) / 1024);
+              dashboardEvents.emitEvent('context:update', {
+                groupFolder: group.folder,
+                percent,
+                sizeKB,
+              });
             }
-            const sizeKB = Math.round(activeBytes / 1024);
-            const percent = Math.min(
-              100,
-              Math.round((activeBytes / 819200) * 100),
-            );
-            dashboardEvents.emitEvent('context:update', {
-              groupFolder: group.folder,
-              percent,
-              sizeKB,
-            });
           }
         }
       } catch {
@@ -454,11 +477,35 @@ async function runAgent(
     try {
       ensureTmuxSession(group, chatJid);
 
-      // Forward real-time stream events (text + SendMessage) to the dashboard
+      // Emit agent:spawn so dashboard shows activity indicator
+      dashboardEvents.emitEvent('agent:spawn', {
+        groupName: group.name,
+        groupFolder: group.folder,
+        containerName: 'tmux',
+      });
+
+      // Forward real-time stream events (text + SendMessage + activity) to the dashboard
       const agentName = group.name || ASSISTANT_NAME;
       const handleStreamEvent = (evt: TmuxStreamEvent) => {
+        logger.info(
+          { evtType: evt.type, contentLen: evt.content?.length, chatJid },
+          'handleStreamEvent called',
+        );
         const content = evt.content;
         if (!content) return;
+
+        // Activity events → container:log (shows in terminal panel)
+        if (evt.type === 'activity') {
+          dashboardEvents.emitEvent('container:log', {
+            groupName: group.name,
+            groupFolder: group.folder,
+            line: content,
+            stream: 'stdout',
+          });
+          return;
+        }
+
+        // Text + SendMessage events → message:new (shows in chat)
         const sender = evt.sender || agentName;
         const msgId = `stream-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const timestamp = new Date().toISOString();
@@ -497,6 +544,13 @@ async function runAgent(
         handleStreamEvent,
       );
 
+      // Emit agent:exit so dashboard hides activity indicator
+      dashboardEvents.emitEvent('agent:exit', {
+        groupName: group.name,
+        groupFolder: group.folder,
+        duration: Date.now() - agentStart,
+      });
+
       // Track session for resume
       if (output.newSessionId && !group.isTransient) {
         sessions[group.folder] = output.newSessionId;
@@ -516,6 +570,11 @@ async function runAgent(
 
       return output.status === 'error' ? 'error' : 'success';
     } catch (err) {
+      dashboardEvents.emitEvent('agent:exit', {
+        groupName: group.name,
+        groupFolder: group.folder,
+        duration: Date.now() - agentStart,
+      });
       logger.error({ group: group.name, err }, 'Tmux agent error');
       return 'error';
     }
@@ -593,7 +652,7 @@ async function startMessageLoop(): Promise<void> {
   }
   messageLoopRunning = true;
 
-  logger.info(`NanoClaw running (trigger: @${ASSISTANT_NAME})`);
+  logger.info(`DevenClaw running (trigger: @${ASSISTANT_NAME})`);
 
   while (true) {
     try {
@@ -824,7 +883,7 @@ async function checkAndSendOnlineNotification(): Promise<void> {
 
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
-  // Recover existing tmux sessions (they survive NanoClaw restarts)
+  // Recover existing tmux sessions (they survive DevenClaw restarts)
   const recoveredTmux = recoverTmuxSessions();
   if (recoveredTmux.length > 0) {
     logger.info({ sessions: recoveredTmux }, 'Recovered tmux sessions');
@@ -1264,7 +1323,7 @@ const isDirectRun =
 
 if (isDirectRun) {
   main().catch((err) => {
-    logger.error({ err }, 'Failed to start NanoClaw');
+    logger.error({ err }, 'Failed to start DevenClaw');
     process.exit(1);
   });
 }

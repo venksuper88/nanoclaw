@@ -58,15 +58,11 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [showScrollDown, setShowScrollDown] = useState(false);
-  const [containerLogs, setContainerLogs] = useState<string[]>([]);
-  const [logsVisible, setLogsVisible] = useState(false);
-  const logHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const logBoxRef = useRef<HTMLDivElement>(null);
-  const pendingLogs = useRef<string[]>([]);
-  const logFlushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [viewingMedia, setViewingMedia] = useState<{ url: string; filename: string; type: 'image' | 'video' | 'pdf' } | null>(null);
   const [stagedFile, setStagedFile] = useState<File | null>(null);
+  const [containerLogs, setContainerLogs] = useState<string[]>([]);
+  const [logsVisible, setLogsVisible] = useState(false);
   const PAGE_SIZE = 50;
 
   useEffect(() => {
@@ -161,43 +157,11 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
         scrollToBottom();
       }
     };
-    const stripAnsi = (s: string) => s.replace(/\x1B\[[0-9;]*[mGKHFJA-Z]/g, '').trim();
-    const onLog = (d: { groupFolder: string; line: string }) => {
-      if (!selectedGroup || d.groupFolder !== selectedGroup.folder) return;
-      const clean = stripAnsi(d.line);
-      if (!clean) return;
-      pendingLogs.current.push(clean);
-      // Cancel any pending hide
-      if (logHideTimer.current) { clearTimeout(logHideTimer.current); logHideTimer.current = null; }
-      setLogsVisible(true);
-      if (!logFlushTimer.current) {
-        logFlushTimer.current = setTimeout(() => {
-          setContainerLogs(prev => [...prev, ...pendingLogs.current].slice(-60));
-          pendingLogs.current = [];
-          logFlushTimer.current = null;
-          if (logBoxRef.current) logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
-        }, 80);
-      }
-    };
-    const onIdle = (d: { groupFolder: string }) => {
-      if (selectedGroup && d.groupFolder === selectedGroup.folder) {
-        logHideTimer.current = setTimeout(() => {
-          setLogsVisible(false);
-          setContainerLogs([]);
-        }, 2000);
-      }
-    };
     socket.on('message:new', onMsg);
     socket.on('agent:output', onOut);
-    socket.on('container:log', onLog);
-    socket.on('agent:idle', onIdle);
-    socket.on('agent:exit', onIdle);
     return () => {
       socket.off('message:new', onMsg);
       socket.off('agent:output', onOut);
-      socket.off('container:log', onLog);
-      socket.off('agent:idle', onIdle);
-      socket.off('agent:exit', onIdle);
     };
   }, [selectedJid, selectedGroup]);
 
@@ -551,15 +515,6 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
             </div>
           );
         })}
-        {logsVisible && containerLogs.length > 0 && (
-          <div className="terminal-box">
-            <div className="terminal-lines" ref={logBoxRef}>
-              {containerLogs.map((line, i) => (
-                <div key={i} className="terminal-line">{line}</div>
-              ))}
-            </div>
-          </div>
-        )}
         {processing && (
           <div className="typing-indicator">
             <span className="typing-dots"><span>.</span><span>.</span><span>.</span></span>

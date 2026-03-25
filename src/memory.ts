@@ -1,5 +1,5 @@
 /**
- * Memory Service for NanoClaw
+ * Memory Service for DevenClaw
  *
  * Wraps mem0 to provide inject-once memory tracking and write-back.
  * Multi-user: each group has its own memoryUserId for private memories.

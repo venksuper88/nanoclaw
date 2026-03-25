@@ -792,8 +792,8 @@ export async function setRegisteredGroup(
     throw new Error(`Invalid group folder "${group.folder}" for JID ${jid}`);
   }
   await db.execute({
-    sql: `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main, is_transient, memory_mode, memory_scopes, memory_user_id, show_in_sidebar, idle_timeout_minutes, allowed_skills)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    sql: `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main, is_transient, memory_mode, memory_scopes, memory_user_id, show_in_sidebar, idle_timeout_minutes, allowed_skills, mode)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       jid,
       group.name,
@@ -810,6 +810,7 @@ export async function setRegisteredGroup(
       group.showInSidebar === false ? 0 : 1,
       group.idleTimeoutMinutes ?? null,
       JSON.stringify(group.allowedSkills || []),
+      group.mode || 'container',
     ],
   });
 }
