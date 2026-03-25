@@ -509,25 +509,18 @@ async function runAgent(
         const sender = evt.sender || agentName;
         const msgId = `stream-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const timestamp = new Date().toISOString();
-        storeMessage({
-          id: msgId,
-          chat_jid: chatJid,
-          sender,
-          sender_name: sender,
-          content,
-          timestamp,
-          is_from_me: false,
-          is_bot_message: true,
-        }).catch((err) =>
-          logger.warn({ err }, 'Failed to store stream message'),
-        );
+        // Only emit for real-time dashboard display — don't store to DB here.
+        // The onOutput callback (processGroupMessages) handles authoritative DB storage,
+        // channel delivery, and memory accumulation after the agent completes.
         dashboardEvents.emitEvent('message:new', {
           chatJid,
           sender,
           senderName: sender,
           content,
           timestamp,
-          isFromMe: false,
+          isFromMe: true,
+          isBotMessage: true,
+          isStreamed: true,
         });
       };
 
@@ -559,7 +552,8 @@ async function runAgent(
         );
       }
 
-      // Deliver result to dashboard (same as container path)
+      // Deliver result via onOutput for DB storage, channel delivery, and memory accumulation.
+      // The streaming handler above only emits real-time dashboard events (no DB store).
       if (output.result && onOutput) {
         await onOutput({
           status: output.status,

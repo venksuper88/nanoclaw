@@ -319,13 +319,17 @@ function parseStreamLine(
 
     // Handle tool_result events — show errors in activity stream
     if (event.type === 'tool_result' && event.is_error && event.content) {
-      const errText = typeof event.content === 'string'
-        ? event.content
-        : JSON.stringify(event.content);
+      const errText =
+        typeof event.content === 'string'
+          ? event.content
+          : JSON.stringify(event.content);
       const key = `err:${errText.slice(0, 200)}`;
       if (!emittedKeys.has(key)) {
         emittedKeys.add(key);
-        events.push({ type: 'activity', content: `\u2717 Error: ${errText.slice(0, 200)}` });
+        events.push({
+          type: 'activity',
+          content: `\u2717 Error: ${errText.slice(0, 200)}`,
+        });
       }
     }
 
@@ -437,7 +441,10 @@ export async function runTmuxAgent(
         logger.info({ emittedCount }, 'drainStreamLog: emitted events');
       }
     } catch (err) {
-      logger.error({ err, streamLogFile, streamOffset }, 'Error reading stream log');
+      logger.error(
+        { err, streamLogFile, streamOffset },
+        'Error reading stream log',
+      );
     }
   }
 

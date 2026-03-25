@@ -137,13 +137,13 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
 
   useEffect(() => {
     const socket = getSocket();
-    const onMsg = (d: { chatJid: string; senderName: string; content: string; timestamp: string; isFromMe: boolean }) => {
+    const onMsg = (d: { chatJid: string; senderName: string; content: string; timestamp: string; isFromMe: boolean; isBotMessage?: boolean; isStreamed?: boolean }) => {
       if (d.chatJid === selectedJid) {
         // Deduplicate: skip if we already have a message with same content + similar timestamp (from optimistic add)
         setMessages(p => {
           const isDupe = p.some(m => m.content === d.content && Math.abs(new Date(m.timestamp).getTime() - new Date(d.timestamp).getTime()) < 3000);
           if (isDupe) return p;
-          const newMsg = { id: `rt-${Date.now()}`, senderName: d.senderName, content: d.content, timestamp: d.timestamp, isFromMe: d.isFromMe, isBotMessage: false };
+          const newMsg = { id: `rt-${Date.now()}`, senderName: d.senderName, content: d.content, timestamp: d.timestamp, isFromMe: d.isFromMe, isBotMessage: d.isBotMessage || false };
           setMessageCache(prev => ({ ...prev, [d.chatJid]: [...(prev[d.chatJid] || []), newMsg] }));
           return [...p, newMsg];
         });
@@ -151,10 +151,15 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
     };
     const onOut = (d: { groupFolder: string; text: string }) => {
       if (selectedGroup && d.groupFolder === selectedGroup.folder) {
-        const newMsg = { id: `ag-${Date.now()}`, senderName: selectedGroup.name, content: d.text, timestamp: new Date().toISOString(), isFromMe: false, isBotMessage: true };
-        setMessages(p => [...p, newMsg]);
-        if (selectedJid) setMessageCache(prev => ({ ...prev, [selectedJid]: [...(prev[selectedJid] || []), newMsg] }));
-        scrollToBottom();
+        // Deduplicate: skip if streaming already added this message via message:new
+        setMessages(p => {
+          const isDupe = p.some(m => m.content === d.text && Math.abs(new Date(m.timestamp).getTime() - Date.now()) < 10000);
+          if (isDupe) return p;
+          const newMsg = { id: `ag-${Date.now()}`, senderName: selectedGroup.name, content: d.text, timestamp: new Date().toISOString(), isFromMe: false, isBotMessage: true };
+          if (selectedJid) setMessageCache(prev => ({ ...prev, [selectedJid]: [...(prev[selectedJid] || []), newMsg] }));
+          scrollToBottom();
+          return [...p, newMsg];
+        });
       }
     };
     socket.on('message:new', onMsg);

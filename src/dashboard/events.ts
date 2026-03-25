@@ -8,6 +8,8 @@ export interface DashboardEventMap {
     content: string;
     timestamp: string;
     isFromMe: boolean;
+    isBotMessage?: boolean;
+    isStreamed?: boolean;
   };
   'agent:spawn': {
     groupName: string;

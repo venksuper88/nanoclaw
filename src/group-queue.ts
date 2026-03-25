@@ -164,7 +164,10 @@ export class GroupQueue {
     if (state.transientTimer) clearTimeout(state.transientTimer);
     state.transientTimer = setTimeout(() => {
       state.transientTimer = null;
-      logger.debug({ groupJid, delayMs }, 'Transient timer expired, closing stdin');
+      logger.debug(
+        { groupJid, delayMs },
+        'Transient timer expired, closing stdin',
+      );
       this.closeStdin(groupJid);
     }, delayMs);
   }
