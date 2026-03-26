@@ -120,12 +120,15 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
   fs.mkdirSync(path.join(ipcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(ipcDir, 'input'), { recursive: true });
 
+  // Status line script writes Claude Code's pre-calculated context JSON to IPC
+  const contextFile = path.join(ipcDir, 'context.json');
   const settings = {
     env: {
       CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
       CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
     },
+    statusLine: `bash -c 'cat > "${contextFile}"'`,
     mcpServers: {
       nanoclaw: {
         command: 'node',

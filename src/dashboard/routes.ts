@@ -33,7 +33,7 @@ import {
 } from '../db.js';
 import { ASSISTANT_NAME, GROUPS_DIR } from '../config.js';
 import { dashboardEvents } from './events.js';
-import { resolveGroupFolderPath } from '../group-folder.js';
+import { resolveGroupFolderPath, resolveGroupIpcPath } from '../group-folder.js';
 import { formatMessages } from '../router.js';
 import { logger } from '../logger.js';
 import { randomUUID } from 'crypto';
@@ -516,130 +516,46 @@ export function createRouter(): Router {
     }
   });
 
-  // ── Context usage ──
+  // ── Context usage (reads from Claude Code's statusLine output) ──
   router.get(
     '/api/groups/:jid/context',
     async (req: Request, res: Response) => {
       const jid = decodeURIComponent(req.params.jid as string);
       const groups = await getAllRegisteredGroups();
       const group = groups[jid];
+      const empty = { percent: 0, sizeKB: 0, tokens: 0 };
       if (!group) {
-        res.json({ ok: true, data: { percent: 0, sizeKB: 0 } });
+        res.json({ ok: true, data: empty });
         return;
       }
 
-      const projectsDir = path.resolve(
-        process.cwd(),
-        'data',
-        'sessions',
-        group.folder,
-        '.claude',
-        'projects',
-      );
-
-      // Scan all project subdirectories (handles both container and tmux mode paths)
-      let transcriptFile = '';
-      const sessions = await getAllSessions();
-      const sessionId = sessions[group.folder];
-      if (fs.existsSync(projectsDir)) {
-        let newestMtime = 0;
-        const projectDirs = fs.readdirSync(projectsDir).filter((d) =>
-          fs.statSync(path.join(projectsDir, d)).isDirectory(),
-        );
-        for (const dir of projectDirs) {
-          const dirPath = path.join(projectsDir, dir);
-          // Try session ID first
-          if (sessionId && !transcriptFile) {
-            const candidate = path.join(dirPath, `${sessionId}.jsonl`);
-            if (fs.existsSync(candidate)) {
-              transcriptFile = candidate;
-              continue;
-            }
-          }
-          // Fall back to most recent .jsonl across all project dirs
-          const jsonlFiles = fs
-            .readdirSync(dirPath)
-            .filter((f) => f.endsWith('.jsonl'));
-          for (const f of jsonlFiles) {
-            const mt = fs.statSync(path.join(dirPath, f)).mtimeMs;
-            if (mt > newestMtime) {
-              newestMtime = mt;
-              transcriptFile = path.join(dirPath, f);
-            }
-          }
-        }
-      }
-      if (!transcriptFile) {
-        res.json({ ok: true, data: { percent: 0, sizeKB: 0 } });
-        return;
-      }
-
-      // Read real token counts from the transcript's usage data.
-      // Each assistant message has "usage":{"input_tokens":N,"cache_creation_input_tokens":N,"cache_read_input_tokens":N}
-      // The last usage entry gives the current context size.
-      // Max context: 1M tokens for Max plan.
       try {
-        const stat = fs.statSync(transcriptFile);
-        // Only read the tail — usage is in the most recent messages
-        const TAIL_READ = Math.min(stat.size, 512 * 1024); // last 512KB
-        const buf = Buffer.alloc(TAIL_READ);
-        const fd = fs.openSync(transcriptFile, 'r');
-        fs.readSync(fd, buf, 0, TAIL_READ, stat.size - TAIL_READ);
-        fs.closeSync(fd);
-        const tail = buf.toString('utf-8');
-
-        // Find the last "usage" block — scan from end
-        let lastInputTokens = 0;
-        let lastCacheCreate = 0;
-        let lastCacheRead = 0;
-        let msgCount = 0;
-
-        const lines = tail.split('\n');
-        for (let i = lines.length - 1; i >= 0; i--) {
-          const line = lines[i];
-          if (!line.includes('"usage"')) continue;
-
-          // Extract token counts with regex (faster than JSON.parse for large lines)
-          const inputMatch = line.match(/"input_tokens":(\d+)/);
-          const cacheCreateMatch = line.match(
-            /"cache_creation_input_tokens":(\d+)/,
-          );
-          const cacheReadMatch = line.match(/"cache_read_input_tokens":(\d+)/);
-
-          if (inputMatch || cacheCreateMatch || cacheReadMatch) {
-            lastInputTokens = inputMatch ? parseInt(inputMatch[1], 10) : 0;
-            lastCacheCreate = cacheCreateMatch
-              ? parseInt(cacheCreateMatch[1], 10)
-              : 0;
-            lastCacheRead = cacheReadMatch
-              ? parseInt(cacheReadMatch[1], 10)
-              : 0;
-            break;
-          }
+        const contextFile = path.join(resolveGroupIpcPath(group.folder), 'context.json');
+        if (!fs.existsSync(contextFile)) {
+          res.json({ ok: true, data: empty });
+          return;
         }
-
-        // Count user messages in the tail for display
-        for (const line of lines) {
-          if (line.includes('"type":"user"')) msgCount++;
-        }
-
-        const totalTokens = lastInputTokens + lastCacheCreate + lastCacheRead;
-        const MAX_CONTEXT_TOKENS = 1_000_000; // 1M for Max plan
-        const percent =
-          totalTokens > 0
-            ? Math.min(99, Math.round((totalTokens / MAX_CONTEXT_TOKENS) * 100))
-            : 0;
-        const sizeKB = Math.round((totalTokens * 4) / 1024); // ~4 chars/token rough size
+        const ctx = JSON.parse(fs.readFileSync(contextFile, 'utf-8'));
+        const cw = ctx.context_window || {};
+        const percent = cw.used_percentage ?? 0;
+        const tokens = (cw.current_usage?.input_tokens ?? 0)
+          + (cw.current_usage?.cache_creation_input_tokens ?? 0)
+          + (cw.current_usage?.cache_read_input_tokens ?? 0);
+        const sizeKB = Math.round((tokens * 4) / 1024);
 
         res.json({
           ok: true,
-          data: { percent, sizeKB, messages: msgCount, tokens: totalTokens },
+          data: {
+            percent,
+            sizeKB,
+            tokens,
+            contextWindowSize: cw.context_window_size,
+            rateLimits: ctx.rate_limits,
+            sessionId: ctx.session_id,
+          },
         });
       } catch {
-        res.json({
-          ok: true,
-          data: { percent: 0, sizeKB: 0, messages: 0, tokens: 0 },
-        });
+        res.json({ ok: true, data: empty });
       }
     },
   );

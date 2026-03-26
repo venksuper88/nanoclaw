@@ -63,7 +63,7 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
+import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -303,83 +303,26 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         await channel?.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
-      // Emit context usage from real token counts after each output
+      // Emit context usage from Claude Code's statusLine output (context.json)
       try {
-        const projectsDir = path.join(
-          DATA_DIR,
-          'sessions',
-          group.folder,
-          '.claude',
-          'projects',
+        const contextFile = path.join(
+          resolveGroupIpcPath(group.folder),
+          'context.json',
         );
-        // Scan all project subdirectories (handles both container -workspace-group and tmux host paths)
-        let transcriptFile = '';
-        if (fs.existsSync(projectsDir)) {
-          const sid = sessions[group.folder];
-          let newestMtime = 0;
-          const projectDirs = fs.readdirSync(projectsDir).filter((d) =>
-            fs.statSync(path.join(projectsDir, d)).isDirectory(),
-          );
-          for (const dir of projectDirs) {
-            const dirPath = path.join(projectsDir, dir);
-            // Try session ID first
-            if (sid && !transcriptFile) {
-              const candidate = path.join(dirPath, `${sid}.jsonl`);
-              if (fs.existsSync(candidate)) {
-                transcriptFile = candidate;
-                continue;
-              }
-            }
-            // Fall back to most recent .jsonl across all project dirs
-            const jsonlFiles = fs
-              .readdirSync(dirPath)
-              .filter((f) => f.endsWith('.jsonl'));
-            for (const f of jsonlFiles) {
-              const mt = fs.statSync(path.join(dirPath, f)).mtimeMs;
-              if (mt > newestMtime) {
-                newestMtime = mt;
-                transcriptFile = path.join(dirPath, f);
-              }
-            }
-          }
-          if (transcriptFile) {
-            // Read tail for token usage (matches API calculation)
-            const stat = fs.statSync(transcriptFile);
-            const TAIL_READ = Math.min(stat.size, 512 * 1024);
-            const buf = Buffer.alloc(TAIL_READ);
-            const fd = fs.openSync(transcriptFile, 'r');
-            fs.readSync(fd, buf, 0, TAIL_READ, stat.size - TAIL_READ);
-            fs.closeSync(fd);
-            const tail = buf.toString('utf-8');
-            const tailLines = tail.split('\n');
-            let totalTokens = 0;
-            for (let i = tailLines.length - 1; i >= 0; i--) {
-              const line = tailLines[i];
-              if (!line.includes('"usage"')) continue;
-              const inp = line.match(/"input_tokens":(\d+)/);
-              const cc = line.match(/"cache_creation_input_tokens":(\d+)/);
-              const cr = line.match(/"cache_read_input_tokens":(\d+)/);
-              if (inp || cc || cr) {
-                totalTokens =
-                  (inp ? parseInt(inp[1], 10) : 0) +
-                  (cc ? parseInt(cc[1], 10) : 0) +
-                  (cr ? parseInt(cr[1], 10) : 0);
-                break;
-              }
-            }
-            if (totalTokens > 0) {
-              const MAX_CONTEXT = 1_000_000;
-              const percent = Math.min(
-                99,
-                Math.round((totalTokens / MAX_CONTEXT) * 100),
-              );
-              const sizeKB = Math.round((totalTokens * 4) / 1024);
-              dashboardEvents.emitEvent('context:update', {
-                groupFolder: group.folder,
-                percent,
-                sizeKB,
-              });
-            }
+        if (fs.existsSync(contextFile)) {
+          const ctx = JSON.parse(fs.readFileSync(contextFile, 'utf-8'));
+          const cw = ctx.context_window || {};
+          const percent = cw.used_percentage ?? 0;
+          if (percent > 0) {
+            const tokens =
+              (cw.current_usage?.input_tokens ?? 0) +
+              (cw.current_usage?.cache_creation_input_tokens ?? 0) +
+              (cw.current_usage?.cache_read_input_tokens ?? 0);
+            dashboardEvents.emitEvent('context:update', {
+              groupFolder: group.folder,
+              percent,
+              sizeKB: Math.round((tokens * 4) / 1024),
+            });
           }
         }
       } catch {
