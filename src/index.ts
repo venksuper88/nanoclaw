@@ -288,18 +288,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             text,
           });
         }
-        // Store agent response in DB — use group name as sender so each agent has its own identity
-        const agentMsgId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-        await storeMessage({
-          id: agentMsgId,
-          chat_jid: chatJid,
-          sender: group.name,
-          sender_name: group.name,
-          content: text,
-          timestamp: new Date().toISOString(),
-          is_from_me: true,
-          is_bot_message: true,
-        }).catch((err) => logger.warn({ err }, 'storeMessage failed'));
+        // Store agent response in DB — skip if streamed (already stored per-chunk)
+        if (!result.streamed) {
+          const agentMsgId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          await storeMessage({
+            id: agentMsgId,
+            chat_jid: chatJid,
+            sender: group.name,
+            sender_name: group.name,
+            content: text,
+            timestamp: new Date().toISOString(),
+            is_from_me: true,
+            is_bot_message: true,
+          }).catch((err) => logger.warn({ err }, 'storeMessage failed'));
+        }
         await channel?.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
@@ -459,13 +461,10 @@ async function runAgent(
           return;
         }
 
-        // Text + SendMessage events → message:new (shows in chat)
+        // Text + SendMessage events → message:new (shows in chat) + store to DB
         const sender = evt.sender || agentName;
         const msgId = `stream-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const timestamp = new Date().toISOString();
-        // Only emit for real-time dashboard display — don't store to DB here.
-        // The onOutput callback (processGroupMessages) handles authoritative DB storage,
-        // channel delivery, and memory accumulation after the agent completes.
         dashboardEvents.emitEvent('message:new', {
           chatJid,
           sender,
@@ -476,6 +475,18 @@ async function runAgent(
           isBotMessage: true,
           isStreamed: true,
         });
+        // Persist streamed messages to DB so they survive page refresh.
+        // onOutput will skip DB storage when streamed=true to avoid duplicates.
+        storeMessage({
+          id: msgId,
+          chat_jid: chatJid,
+          sender,
+          sender_name: sender,
+          content,
+          timestamp,
+          is_from_me: true,
+          is_bot_message: true,
+        }).catch((err) => logger.warn({ err }, 'storeMessage (stream) failed'));
       };
 
       const output = await runTmuxAgent(

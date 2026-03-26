@@ -369,9 +369,7 @@ export async function runTmuxAgent(
 
   fs.writeFileSync(promptFile, input.prompt);
 
-  // Don't resume sessions in tmux -p mode — each turn is standalone.
-  // Context continuity comes from CLAUDE.md and mem0 enrichment.
-  const sessionArg = 'new';
+  const sessionArg = input.sessionId || 'new';
 
   // Send wrapper command to tmux
   const tmuxCmd = `${TMUX_BIN} send-keys -t ${name} 'bash "${scriptPath}" "${promptFile}" "${sessionArg}" "${doneFile}"' Enter`;

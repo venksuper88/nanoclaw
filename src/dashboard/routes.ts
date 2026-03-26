@@ -33,7 +33,10 @@ import {
 } from '../db.js';
 import { ASSISTANT_NAME, GROUPS_DIR } from '../config.js';
 import { dashboardEvents } from './events.js';
-import { resolveGroupFolderPath, resolveGroupIpcPath } from '../group-folder.js';
+import {
+  resolveGroupFolderPath,
+  resolveGroupIpcPath,
+} from '../group-folder.js';
 import { formatMessages } from '../router.js';
 import { logger } from '../logger.js';
 import { randomUUID } from 'crypto';
@@ -530,7 +533,10 @@ export function createRouter(): Router {
       }
 
       try {
-        const contextFile = path.join(resolveGroupIpcPath(group.folder), 'context.json');
+        const contextFile = path.join(
+          resolveGroupIpcPath(group.folder),
+          'context.json',
+        );
         if (!fs.existsSync(contextFile)) {
           res.json({ ok: true, data: empty });
           return;
@@ -538,9 +544,10 @@ export function createRouter(): Router {
         const ctx = JSON.parse(fs.readFileSync(contextFile, 'utf-8'));
         const cw = ctx.context_window || {};
         const percent = cw.used_percentage ?? 0;
-        const tokens = (cw.current_usage?.input_tokens ?? 0)
-          + (cw.current_usage?.cache_creation_input_tokens ?? 0)
-          + (cw.current_usage?.cache_read_input_tokens ?? 0);
+        const tokens =
+          (cw.current_usage?.input_tokens ?? 0) +
+          (cw.current_usage?.cache_creation_input_tokens ?? 0) +
+          (cw.current_usage?.cache_read_input_tokens ?? 0);
         const sizeKB = Math.round((tokens * 4) / 1024);
 
         res.json({
