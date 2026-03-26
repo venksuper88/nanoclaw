@@ -461,7 +461,75 @@ export async function runTmuxAgent(
         fs.unlinkSync(doneFile);
         // Final drain to catch any remaining stream events
         drainStreamLog();
-        // Clean up stderr log and stream log on success
+
+        // Extract session ID and result text from the stream log (complete record).
+        // Previously used tmux capture-pane (-S -200) which lost data for long conversations.
+        let newSessionId: string | undefined;
+        let resultText: string | null = null;
+
+        if (fs.existsSync(streamLogFile)) {
+          try {
+            const streamContent = fs.readFileSync(streamLogFile, 'utf-8');
+            const resultLines = streamContent
+              .split('\n')
+              .filter((l) => l.includes('"type":"result"'));
+            logger.debug(
+              { resultLineCount: resultLines.length },
+              'Parsed result lines from stream log',
+            );
+            if (resultLines.length > 0) {
+              try {
+                const resultEvent = JSON.parse(
+                  resultLines[resultLines.length - 1],
+                );
+                newSessionId = resultEvent.session_id;
+                resultText = resultEvent.result || null;
+              } catch {
+                const sessionMatch = streamContent.match(
+                  /"session_id":"([^"]+)"/,
+                );
+                if (sessionMatch) newSessionId = sessionMatch[1];
+              }
+            } else {
+              const sessionMatch = streamContent.match(
+                /"session_id":"([^"]+)"/,
+              );
+              if (sessionMatch) newSessionId = sessionMatch[1];
+            }
+          } catch (err) {
+            logger.warn({ err, streamLogFile }, 'Failed to read stream log');
+          }
+        }
+
+        // Fallback: try tmux pane capture if stream log didn't yield session ID
+        if (!newSessionId) {
+          const paneOutput = tmuxExec(
+            `${TMUX_BIN} capture-pane -t ${name} -p -J -S -200 2>/dev/null`,
+          );
+          const resultLines = paneOutput
+            .split('\n')
+            .filter((l) => l.includes('"type":"result"'));
+          if (resultLines.length > 0) {
+            try {
+              const resultEvent = JSON.parse(
+                resultLines[resultLines.length - 1],
+              );
+              if (!newSessionId) newSessionId = resultEvent.session_id;
+              if (!resultText) resultText = resultEvent.result || null;
+            } catch {
+              const sessionMatch = paneOutput.match(
+                /"session_id":"([^"]+)"/,
+              );
+              if (sessionMatch && !newSessionId)
+                newSessionId = sessionMatch[1];
+            }
+          } else {
+            const sessionMatch = paneOutput.match(/"session_id":"([^"]+)"/);
+            if (sessionMatch) newSessionId = sessionMatch[1];
+          }
+        }
+
+        // Clean up stderr log and stream log
         try {
           fs.unlinkSync(`${doneFile}.stderr`);
         } catch {
@@ -471,37 +539,6 @@ export async function runTmuxAgent(
           fs.unlinkSync(streamLogFile);
         } catch {
           /* ignore */
-        }
-
-        // Extract session ID and result text from tmux pane output
-        let newSessionId: string | undefined;
-        let resultText: string | null = null;
-        // Capture with join-wrapped lines (-J) for clean JSON parsing
-        const paneOutput = tmuxExec(
-          `${TMUX_BIN} capture-pane -t ${name} -p -J -S -200 2>/dev/null`,
-        );
-
-        // Parse the last result event from stream-json output
-        const resultLines = paneOutput
-          .split('\n')
-          .filter((l) => l.includes('"type":"result"'));
-        logger.debug(
-          { resultLineCount: resultLines.length },
-          'Parsed result lines from pane',
-        );
-        if (resultLines.length > 0) {
-          try {
-            const resultEvent = JSON.parse(resultLines[resultLines.length - 1]);
-            newSessionId = resultEvent.session_id;
-            resultText = resultEvent.result || null;
-          } catch {
-            // Fall back to regex
-            const sessionMatch = paneOutput.match(/"session_id":"([^"]+)"/);
-            if (sessionMatch) newSessionId = sessionMatch[1];
-          }
-        } else {
-          const sessionMatch = paneOutput.match(/"session_id":"([^"]+)"/);
-          if (sessionMatch) newSessionId = sessionMatch[1];
         }
 
         // Only store session ID if the turn was truly successful (not auth error)
