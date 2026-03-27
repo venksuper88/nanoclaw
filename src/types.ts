@@ -1,37 +1,15 @@
-export interface AdditionalMount {
-  hostPath: string; // Absolute path on host (supports ~ for home)
-  containerPath?: string; // Optional — defaults to basename of hostPath. Mounted at /workspace/extra/{value}
-  readonly?: boolean; // Default: true for safety
-}
-
-/**
- * Mount Allowlist - Security configuration for additional mounts
- * This file should be stored at ~/.config/nanoclaw/mount-allowlist.json
- * and is NOT mounted into any container, making it tamper-proof from agents.
- */
-export interface MountAllowlist {
-  // Directories that can be mounted into containers
-  allowedRoots: AllowedRoot[];
-  // Glob patterns for paths that should never be mounted (e.g., ".ssh", ".gnupg")
-  blockedPatterns: string[];
-  // If true, non-main groups can only mount read-only regardless of config
-  nonMainReadOnly: boolean;
-}
-
-export interface AllowedRoot {
-  // Absolute path or ~ for home (e.g., "~/projects", "/var/repos")
-  path: string;
-  // Whether read-write mounts are allowed under this root
-  allowReadWrite: boolean;
-  // Optional description for documentation
-  description?: string;
-}
-
-export interface ContainerConfig {
-  additionalMounts?: AdditionalMount[];
-  timeout?: number; // Default: 300000 (5 minutes)
-  dockerSocket?: boolean; // Mount Docker socket into container (main groups only)
-  projectReadWrite?: boolean; // Mount project root read-write instead of read-only (main groups only)
+export interface AgentOutput {
+  status: 'success' | 'error';
+  result: string | null;
+  newSessionId?: string;
+  error?: string;
+  streamed?: boolean;
+  usage?: {
+    input_tokens: number;
+    cache_creation_input_tokens: number;
+    cache_read_input_tokens: number;
+    output_tokens: number;
+  };
 }
 
 export interface RegisteredGroup {
@@ -39,17 +17,17 @@ export interface RegisteredGroup {
   folder: string;
   trigger: string;
   added_at: string;
-  containerConfig?: ContainerConfig;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
-  isTransient?: boolean; // Container closes after response instead of idling 30min. Fresh session each trigger.
+  isTransient?: boolean; // Agent closes after response instead of idling 30min. Fresh session each trigger.
   memoryMode?: 'full' | 'local' | 'none'; // full=mem0 scoped, local=CLAUDE.md only, none=no memory
   memoryScopes?: string[]; // which shared scope tags this group can access when memoryMode='full'
   memoryUserId?: string; // mem0 userId for this group's private memory pool (default: 'venky')
   showInSidebar?: boolean; // Whether to show in chat sidebar (default: true). False = only in Settings/Overview.
   idleTimeoutMinutes?: number; // 0 = always on, null/undefined = default (30min), N = custom minutes
-  allowedSkills?: string[]; // Container skill folders to mount. Empty = all skills.
-  mode?: 'container' | 'tmux'; // Default: 'container'. 'tmux' runs claude CLI in a persistent tmux session on the host.
+  allowedSkills?: string[]; // Skill folders to load. Empty = all skills.
+  mode?: string; // Kept for DB compat. Always 'tmux' now.
+  workDir?: string; // Custom working directory (absolute path)
 }
 
 export interface NewMessage {
@@ -85,6 +63,37 @@ export interface TaskRunLog {
   status: 'success' | 'error';
   result: string | null;
   error: string | null;
+}
+
+// --- Todos & Reminders ---
+
+export interface Todo {
+  id: string;
+  user_id: string;
+  title: string;
+  data: string | null;
+  status: 'pending' | 'in_progress' | 'done';
+  priority: 'low' | 'medium' | 'high';
+  due_date: string | null;
+  remind_at: string | null;
+  recurrence: string | null;
+  reminder_fired_at: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Reminder {
+  id: string;
+  user_id: string;
+  title: string;
+  data: string | null;
+  remind_at: string;
+  recurrence: string | null;
+  status: 'active' | 'fired' | 'snoozed' | 'dismissed';
+  snoozed_until: string | null;
+  created_by: string;
+  created_at: string;
 }
 
 // --- Channel abstraction ---

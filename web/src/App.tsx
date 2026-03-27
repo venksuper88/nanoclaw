@@ -5,11 +5,11 @@ import { ChatView } from './components/ChatView';
 import { OverviewView } from './components/OverviewView';
 import { TasksView } from './components/TasksView';
 import { SettingsView } from './components/SettingsView';
-import { SkillsView } from './components/SkillsView';
+import { TodosView } from './components/TodosView';
 import './styles.css';
 import { useNotifications } from './hooks/useNotifications';
 
-export type View = 'chat' | 'overview' | 'tasks' | 'settings' | 'skills';
+export type View = 'chat' | 'overview' | 'tasks' | 'todos' | 'settings';
 
 export interface Group {
   jid: string;
@@ -37,13 +37,21 @@ const TABS: { view: View; icon: string; label: string }[] = [
   { view: 'chat', icon: 'chat', label: 'Chat' },
   { view: 'overview', icon: 'dashboard', label: 'Overview' },
   { view: 'tasks', icon: 'schedule', label: 'Tasks' },
+  { view: 'todos', icon: 'checklist', label: 'Todos' },
   { view: 'settings', icon: 'settings', label: 'Settings' },
-  { view: 'skills', icon: 'extension', label: 'Skills' },
 ];
 
 export function App() {
   const [groups, setGroups] = useState<Group[]>([]);
-  const [selectedJid, setSelectedJid] = useState<string | null>(null);
+  const [selectedJid, _setSelectedJid] = useState<string | null>(() => localStorage.getItem('selectedJid'));
+  const setSelectedJid = (jidOrFn: string | null | ((prev: string | null) => string | null)) => {
+    _setSelectedJid(prev => {
+      const next = typeof jidOrFn === 'function' ? jidOrFn(prev) : jidOrFn;
+      if (next) localStorage.setItem('selectedJid', next);
+      else localStorage.removeItem('selectedJid');
+      return next;
+    });
+  };
   const [view, setView] = useState<View>('chat');
   const [status, setStatus] = useState<Status | null>(null);
   const [connected, setConnected] = useState(false);
@@ -55,6 +63,22 @@ export function App() {
   const [messageCache, setMessageCache] = useState<Record<string, any[]>>({});
   const swipeRef = useRef<{ startX: number; startY: number } | null>(null);
   const { permission, subscribed, subscribe, loading, supported } = useNotifications();
+
+  // Deep link: intercept clicks on #tasks, #todos, etc. to switch tabs
+  useEffect(() => {
+    const VALID_VIEWS = ['chat', 'overview', 'tasks', 'todos', 'settings'];
+    const onClick = (e: MouseEvent) => {
+      const anchor = (e.target as HTMLElement).closest('a');
+      if (!anchor) return;
+      const href = anchor.getAttribute('href') || '';
+      if (href.startsWith('#') && VALID_VIEWS.includes(href.slice(1))) {
+        e.preventDefault();
+        setView(href.slice(1) as View);
+      }
+    };
+    document.addEventListener('click', onClick);
+    return () => document.removeEventListener('click', onClick);
+  }, []);
 
   // Swipe from left edge to open drawer
   useEffect(() => {
@@ -170,7 +194,7 @@ export function App() {
   useEffect(() => {
     groups.forEach(g => {
       api.getContextUsage(g.jid).then(r => {
-        if (r.ok && r.data.percent > 0) {
+        if (r.ok) {
           setContextPercent(prev => ({ ...prev, [g.folder]: r.data.percent }));
         }
       }).catch(() => {});
@@ -300,8 +324,8 @@ export function App() {
           <OverviewView groups={groups} status={status} processingFolders={processingFolders} onSelectGroup={handleSelectGroup} onRefresh={loadData} />
         )}
         {view === 'tasks' && <TasksView />}
+        {view === 'todos' && <TodosView />}
         {view === 'settings' && <SettingsView groups={groups} />}
-        {view === 'skills' && <SkillsView />}
       </main>
 
       {/* Bottom nav — always visible */}

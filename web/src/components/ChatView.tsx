@@ -297,7 +297,9 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
   const filteredCommands = showCommands ? commands.filter(c => c.command.toLowerCase().includes(cmdFilter)) : [];
 
   const selectCommand = (cmd: Command) => {
-    setInput(`/${cmd.command} `);
+    const text = `/${cmd.command} `;
+    setInput(text);
+    if (inputRef.current) (inputRef.current as any).innerText = text;
     setShowCommands(false);
     inputRef.current?.focus();
   };
@@ -342,7 +344,6 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
       (inputRef.current as any)?.focus();
       return;
     }
-
     setSending(true);
 
     // Upload file first if staged
@@ -583,6 +584,11 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
           }}
           onKeyDown={e => {
             onInputKeyDown(e);
+          }}
+          onPaste={e => {
+            e.preventDefault();
+            const text = e.clipboardData.getData('text/plain');
+            document.execCommand('insertText', false, text);
           }}
           suppressContentEditableWarning
         />

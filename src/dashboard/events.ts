@@ -40,3 +40,6 @@ class DashboardEventHub extends EventEmitter {
 }
 
 export const dashboardEvents = new DashboardEventHub();
+
+// In-memory context usage cache (populated from stream-json usage after each turn)
+export const contextCache: Record<string, { percent: number; sizeKB: number; tokens: number }> = {};

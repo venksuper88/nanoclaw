@@ -4,22 +4,30 @@ import fs from 'fs';
 
 import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
 import {
-  ContainerOutput,
-  runContainerAgent,
   writeTasksSnapshot,
-} from './container-runner.js';
+} from './ipc-snapshots.js';
 import {
+  ensureSession as ensureTmuxSession,
+  runTmuxAgent,
+  TmuxStreamEvent,
+} from './tmux-runner.js';
+import {
+  getAllDashboardTokens,
   getAllTasks,
   getDueTasks,
+  getDueTodoReminders,
   getTaskById,
   logTaskRun,
+  storeMessage,
   updateTask,
   updateTaskAfterRun,
+  updateTodo,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
-import { RegisteredGroup, ScheduledTask } from './types.js';
+import { dashboardEvents } from './dashboard/events.js';
+import { AgentOutput, RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
  * Compute the next run time for a recurring task, anchored to the
@@ -129,7 +137,7 @@ async function runTask(
     return;
   }
 
-  // Update tasks snapshot for container to read (filtered by group)
+  // Update tasks snapshot for agent to read (filtered by group)
   const isMain = group.isMain === true;
   const tasks = await getAllTasks();
   writeTasksSnapshot(
@@ -154,7 +162,7 @@ async function runTask(
   const sessionId =
     task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
 
-  // After the task produces a result, close the container promptly.
+  // After the task produces a result, close the agent promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
   // query loop to time out. A short delay handles any final MCP calls.
   const TASK_CLOSE_DELAY_MS = 10000;
@@ -163,13 +171,65 @@ async function runTask(
   const scheduleClose = () => {
     if (closeTimer) return; // already scheduled
     closeTimer = setTimeout(() => {
-      logger.debug({ taskId: task.id }, 'Closing task container after result');
+      logger.debug({ taskId: task.id }, 'Closing task agent after result');
       deps.queue.closeStdin(task.chat_jid);
     }, TASK_CLOSE_DELAY_MS);
   };
 
   try {
-    const output = await runContainerAgent(
+    // Ensure tmux session exists
+    ensureTmuxSession(group, task.chat_jid);
+
+    // Emit agent:spawn so dashboard shows activity indicator
+    dashboardEvents.emitEvent('agent:spawn', {
+      groupName: group.name,
+      groupFolder: group.folder,
+      containerName: 'tmux',
+    });
+
+    // Forward real-time stream events to the dashboard
+    const agentName = group.name || ASSISTANT_NAME;
+    const handleStreamEvent = (evt: TmuxStreamEvent) => {
+      const content = evt.content;
+      if (!content) return;
+
+      if (evt.type === 'activity') {
+        dashboardEvents.emitEvent('container:log', {
+          groupName: group.name,
+          groupFolder: group.folder,
+          line: content,
+          stream: 'stdout',
+        });
+        return;
+      }
+
+      // Text + SendMessage events -> message:new (shows in chat) + store to DB
+      const sender = evt.sender || agentName;
+      const msgId = `stream-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const timestamp = new Date().toISOString();
+      dashboardEvents.emitEvent('message:new', {
+        chatJid: task.chat_jid,
+        sender,
+        senderName: sender,
+        content,
+        timestamp,
+        isFromMe: true,
+        isBotMessage: true,
+        isStreamed: true,
+      });
+      storeMessage({
+        id: msgId,
+        chat_jid: task.chat_jid,
+        sender,
+        sender_name: sender,
+        content,
+        timestamp,
+        is_from_me: true,
+        is_bot_message: true,
+      }).catch((err) => logger.warn({ err }, 'storeMessage (task stream) failed'));
+    };
+
+    const output = await runTmuxAgent(
       group,
       {
         prompt: task.prompt,
@@ -177,36 +237,31 @@ async function runTask(
         groupFolder: task.group_folder,
         chatJid: task.chat_jid,
         isMain,
-        isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
       },
-      (proc, containerName) =>
-        deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
-      async (streamedOutput: ContainerOutput) => {
-        if (streamedOutput.result) {
-          result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
-          scheduleClose();
-        }
-        if (streamedOutput.status === 'success') {
-          deps.queue.notifyIdle(task.chat_jid);
-          scheduleClose(); // Close promptly even when result is null (e.g. IPC-only tasks)
-        }
-        if (streamedOutput.status === 'error') {
-          error = streamedOutput.error || 'Unknown error';
-        }
-      },
+      handleStreamEvent,
     );
+
+    dashboardEvents.emitEvent('agent:exit', {
+      groupName: group.name,
+      groupFolder: group.folder,
+      duration: Date.now() - startTime,
+    });
 
     if (closeTimer) clearTimeout(closeTimer);
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
     } else if (output.result) {
-      // Result was already forwarded to the user via the streaming callback above
       result = output.result;
+      // Forward result to user
+      await deps.sendMessage(task.chat_jid, output.result);
+      scheduleClose();
     }
+
+    // Notify idle
+    deps.queue.notifyIdle(task.chat_jid);
+    scheduleClose();
 
     logger.info(
       { taskId: task.id, durationMs: Date.now() - startTime },
@@ -265,6 +320,52 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
           runTask(currentTask, deps),
         );
+      }
+
+      // Check for due todo reminders
+      const tokens = await getAllDashboardTokens();
+      const dueTodoReminders = await getDueTodoReminders();
+      for (const todo of dueTodoReminders) {
+        const groups = deps.registeredGroups();
+
+        // Check if any user has a preferred reminder group
+        const userToken = tokens.find((t) => {
+          if (!t.reminder_group_jid) return false;
+          const grp = groups[t.reminder_group_jid];
+          return grp && (grp.memoryUserId || 'venky') === todo.user_id;
+        });
+
+        let targetJid: string;
+        if (userToken?.reminder_group_jid) {
+          targetJid = userToken.reminder_group_jid;
+        } else {
+          const entries = Object.entries(groups).filter(
+            ([, g]) => (g.memoryUserId || 'venky') === todo.user_id,
+          );
+          const targetEntry = entries.find(([, g]) => g.isMain) || entries.find(([, g]) => g.mode === 'tmux') || entries[0];
+          if (!targetEntry) continue;
+          targetJid = targetEntry[0];
+        }
+
+        const msg = todo.data
+          ? `🔔 **Reminder:** ${todo.title}\n\n${todo.data}`
+          : `🔔 **Reminder:** ${todo.title}`;
+        await deps.sendMessage(targetJid, msg);
+
+        // Mark as fired, handle recurrence
+        const now = new Date().toISOString();
+        if (todo.recurrence) {
+          try {
+            const cron = CronExpressionParser.parse(todo.recurrence, { tz: TIMEZONE });
+            const nextRemind = cron.next().toISOString();
+            await updateTodo(todo.id, { remind_at: nextRemind } as any);
+          } catch {
+            await updateTodo(todo.id, { reminder_fired_at: now } as any);
+          }
+        } else {
+          await updateTodo(todo.id, { reminder_fired_at: now } as any);
+        }
+        logger.info({ todoId: todo.id, userId: todo.user_id }, 'Todo reminder fired');
       }
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');

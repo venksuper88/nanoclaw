@@ -43,6 +43,12 @@ export interface TmuxOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  usage?: {
+    input_tokens: number;
+    cache_creation_input_tokens: number;
+    cache_read_input_tokens: number;
+    output_tokens: number;
+  };
 }
 
 export interface TmuxStreamEvent {
@@ -81,7 +87,8 @@ export function listSessions(): string[] {
   return output.split('\n').filter((s) => s.startsWith(TMUX_PREFIX + '-'));
 }
 
-function groupWorkDir(folder: string): string {
+function groupWorkDir(folder: string, workDir?: string): string {
+  if (workDir) return path.resolve(workDir);
   return path.resolve(GROUPS_DIR, folder);
 }
 
@@ -177,7 +184,7 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
 
   // Copy settings + skills into the group's working directory .claude/
   // so claude picks them up as project-level config (no CLAUDE_CONFIG_DIR needed)
-  const projectClaudeDir = path.join(groupWorkDir(group.folder), '.claude');
+  const projectClaudeDir = path.join(groupWorkDir(group.folder, group.workDir), '.claude');
   fs.mkdirSync(projectClaudeDir, { recursive: true });
   fs.copyFileSync(settingsFile, path.join(projectClaudeDir, 'settings.json'));
   if (fs.existsSync(skillsDst)) {
@@ -228,7 +235,7 @@ echo "{\\"type\\":\\"done\\",\\"exit_code\\":$EXIT_CODE}" > "$DONE_FILE"
  */
 export function ensureSession(group: RegisteredGroup, chatJid: string): void {
   const name = tmuxSessionName(group.folder);
-  const workDir = groupWorkDir(group.folder);
+  const workDir = groupWorkDir(group.folder, group.workDir);
 
   fs.mkdirSync(workDir, { recursive: true });
   setupClaudeConfig(group, chatJid);
@@ -398,6 +405,7 @@ export async function runTmuxAgent(
   let streamOffset = 0; // Track how far we've read
   let streamBuffer = ''; // Partial line buffer
   const emittedKeys = new Set<string>(); // Dedup across progressive snapshots
+  let lastAssistantUsage: TmuxOutput['usage'] | undefined; // Track latest API call's usage
 
   function drainStreamLog(): void {
     if (!onStreamEvent || !fs.existsSync(streamLogFile)) return;
@@ -428,6 +436,19 @@ export async function runTmuxAgent(
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
+        // Extract usage from each assistant event (last one = current context window)
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (parsed.type === 'assistant' && parsed.message?.usage) {
+            const u = parsed.message.usage;
+            lastAssistantUsage = {
+              input_tokens: u.input_tokens ?? 0,
+              cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
+              cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
+              output_tokens: u.output_tokens ?? 0,
+            };
+          }
+        } catch { /* not JSON, skip */ }
         const events = parseStreamLine(trimmed, emittedKeys);
         for (const evt of events) {
           emittedCount++;
@@ -517,11 +538,8 @@ export async function runTmuxAgent(
               if (!newSessionId) newSessionId = resultEvent.session_id;
               if (!resultText) resultText = resultEvent.result || null;
             } catch {
-              const sessionMatch = paneOutput.match(
-                /"session_id":"([^"]+)"/,
-              );
-              if (sessionMatch && !newSessionId)
-                newSessionId = sessionMatch[1];
+              const sessionMatch = paneOutput.match(/"session_id":"([^"]+)"/);
+              if (sessionMatch && !newSessionId) newSessionId = sessionMatch[1];
             }
           } else {
             const sessionMatch = paneOutput.match(/"session_id":"([^"]+)"/);
@@ -554,6 +572,7 @@ export async function runTmuxAgent(
             data.exit_code !== 0
               ? `claude exited with code ${data.exit_code}`
               : undefined,
+          usage: lastAssistantUsage,
         };
 
         logger.info(

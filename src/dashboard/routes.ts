@@ -1,4 +1,3 @@
-import { execSync } from 'child_process';
 import { Router, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
@@ -22,17 +21,31 @@ import {
   getAllTasks,
   getMessagesSince,
   getTaskById,
+  getTaskRunLogs,
   setRegisteredGroup,
   storeMessage,
   updateTask,
+  deleteTask,
+  updateDashboardToken,
+  createTodo,
+  getTodoById,
+  getAllTodos,
+  updateTodo,
+  deleteTodo,
+  createReminder,
+  getReminderById,
+  getAllReminders,
+  updateReminder,
+  deleteReminder,
   getAllScopeDefs,
   createScopeDef,
   deleteScopeDef,
   getDraft,
   setDraft,
+  getRouterState,
 } from '../db.js';
 import { ASSISTANT_NAME, GROUPS_DIR } from '../config.js';
-import { dashboardEvents } from './events.js';
+import { dashboardEvents, contextCache } from './events.js';
 import {
   resolveGroupFolderPath,
   resolveGroupIpcPath,
@@ -336,44 +349,159 @@ export function createRouter(): Router {
   });
 
   // ── Tasks ──
-  router.get('/api/tasks', async (_req: Request, res: Response) => {
+  router.get('/api/tasks', async (req: Request, res: Response) => {
+    const user = getUser(req);
     const tasks = await getAllTasks();
-    res.json({ ok: true, data: tasks });
+    const filtered = tasks.filter(t => user.isOwner || canAccessGroup(user, t.chat_jid));
+    res.json({ ok: true, data: filtered });
   });
 
   router.get('/api/tasks/:id', async (req: Request, res: Response) => {
     const task = await getTaskById(req.params.id as string);
-    if (!task) {
-      res.status(404).json({ ok: false, error: 'Task not found' });
-      return;
-    }
+    if (!task) { res.status(404).json({ ok: false, error: 'Task not found' }); return; }
     res.json({ ok: true, data: task });
+  });
+
+  router.get('/api/tasks/:id/logs', async (req: Request, res: Response) => {
+    const task = await getTaskById(req.params.id as string);
+    if (!task) { res.status(404).json({ ok: false, error: 'Task not found' }); return; }
+    const limit = parseInt(req.query.limit as string) || 20;
+    const logs = await getTaskRunLogs(req.params.id as string, limit);
+    res.json({ ok: true, data: logs });
   });
 
   router.post('/api/tasks/:id/pause', async (req: Request, res: Response) => {
     const task = await getTaskById(req.params.id as string);
-    if (!task) {
-      res.status(404).json({ ok: false, error: 'Task not found' });
-      return;
-    }
+    if (!task) { res.status(404).json({ ok: false, error: 'Task not found' }); return; }
     await updateTask(req.params.id as string, { status: 'paused' });
-    res.json({
-      ok: true,
-      data: { id: req.params.id as string, status: 'paused' },
-    });
+    res.json({ ok: true, data: { id: req.params.id as string, status: 'paused' } });
   });
 
   router.post('/api/tasks/:id/resume', async (req: Request, res: Response) => {
     const task = await getTaskById(req.params.id as string);
-    if (!task) {
-      res.status(404).json({ ok: false, error: 'Task not found' });
-      return;
-    }
+    if (!task) { res.status(404).json({ ok: false, error: 'Task not found' }); return; }
     await updateTask(req.params.id as string, { status: 'active' });
     res.json({
       ok: true,
       data: { id: req.params.id as string, status: 'active' },
     });
+  });
+
+  router.delete('/api/tasks/:id', async (req: Request, res: Response) => {
+    const task = await getTaskById(req.params.id as string);
+    if (!task) { res.status(404).json({ ok: false, error: 'Task not found' }); return; }
+    await deleteTask(req.params.id as string);
+    res.json({ ok: true });
+  });
+
+  // ── Todos ──
+  router.get('/api/todos', async (req: Request, res: Response) => {
+    const user = getUser(req);
+    const todos = await getAllTodos();
+    const groups = await getAllRegisteredGroups();
+    const userIds = new Set(
+      Object.entries(groups)
+        .filter(([jid]) => user.isOwner || canAccessGroup(user, jid))
+        .map(([, g]) => g.memoryUserId || 'venky'),
+    );
+    const filtered = todos.filter((t) => userIds.has(t.user_id));
+    res.json({ ok: true, data: filtered });
+  });
+
+  router.post('/api/todos', async (req: Request, res: Response) => {
+    const { title, data, priority, due_date, remind_at, recurrence, user_id } = req.body;
+    if (!title) { res.status(400).json({ ok: false, error: 'title required' }); return; }
+    const id = `todo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const now = new Date().toISOString();
+    await createTodo({
+      id, user_id: user_id || 'venky', title, data: data || null, status: 'pending',
+      priority: priority || 'medium', due_date: due_date || null, remind_at: remind_at || null,
+      recurrence: recurrence || null, reminder_fired_at: null, created_by: 'dashboard', created_at: now, updated_at: now,
+    });
+    const todo = await getTodoById(id);
+    res.json({ ok: true, data: todo });
+  });
+
+  router.patch('/api/todos/:id', async (req: Request, res: Response) => {
+    const todo = await getTodoById(req.params.id as string);
+    if (!todo) { res.status(404).json({ ok: false, error: 'Not found' }); return; }
+    await updateTodo(req.params.id as string, req.body);
+    const updated = await getTodoById(req.params.id as string);
+    res.json({ ok: true, data: updated });
+  });
+
+  router.delete('/api/todos/:id', async (req: Request, res: Response) => {
+    const todo = await getTodoById(req.params.id as string);
+    if (!todo) { res.status(404).json({ ok: false, error: 'Not found' }); return; }
+    await deleteTodo(req.params.id as string);
+    res.json({ ok: true });
+  });
+
+  // ── Reminders ──
+  router.get('/api/reminders', async (req: Request, res: Response) => {
+    const user = getUser(req);
+    const reminders = await getAllReminders();
+    const groups = await getAllRegisteredGroups();
+    const userIds = new Set(
+      Object.entries(groups)
+        .filter(([jid]) => user.isOwner || canAccessGroup(user, jid))
+        .map(([, g]) => g.memoryUserId || 'venky'),
+    );
+    const filtered = reminders.filter((r) => userIds.has(r.user_id));
+    res.json({ ok: true, data: filtered });
+  });
+
+  router.post('/api/reminders', async (req: Request, res: Response) => {
+    const { title, data, remind_at, recurrence, user_id } = req.body;
+    if (!title || !remind_at) { res.status(400).json({ ok: false, error: 'title and remind_at required' }); return; }
+    const id = `rem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    await createReminder({
+      id, user_id: user_id || 'venky', title, data: data || null, remind_at,
+      recurrence: recurrence || null, status: 'active', snoozed_until: null,
+      created_by: 'dashboard', created_at: new Date().toISOString(),
+    });
+    const reminder = await getReminderById(id);
+    res.json({ ok: true, data: reminder });
+  });
+
+  router.patch('/api/reminders/:id', async (req: Request, res: Response) => {
+    const reminder = await getReminderById(req.params.id as string);
+    if (!reminder) { res.status(404).json({ ok: false, error: 'Not found' }); return; }
+    await updateReminder(req.params.id as string, req.body);
+    const updated = await getReminderById(req.params.id as string);
+    res.json({ ok: true, data: updated });
+  });
+
+  router.post('/api/reminders/:id/snooze', async (req: Request, res: Response) => {
+    const reminder = await getReminderById(req.params.id as string);
+    if (!reminder) { res.status(404).json({ ok: false, error: 'Not found' }); return; }
+    const { snooze_until } = req.body;
+    if (!snooze_until) { res.status(400).json({ ok: false, error: 'snooze_until required' }); return; }
+    await updateReminder(req.params.id as string, { status: 'snoozed', snoozed_until: snooze_until });
+    res.json({ ok: true });
+  });
+
+  router.post('/api/reminders/:id/dismiss', async (req: Request, res: Response) => {
+    const reminder = await getReminderById(req.params.id as string);
+    if (!reminder) { res.status(404).json({ ok: false, error: 'Not found' }); return; }
+    await updateReminder(req.params.id as string, { status: 'dismissed' });
+    res.json({ ok: true });
+  });
+
+  router.delete('/api/reminders/:id', async (req: Request, res: Response) => {
+    const reminder = await getReminderById(req.params.id as string);
+    if (!reminder) { res.status(404).json({ ok: false, error: 'Not found' }); return; }
+    await deleteReminder(req.params.id as string);
+    res.json({ ok: true });
+  });
+
+  // ── Token reminder group ──
+  router.patch('/api/tokens/:token/reminder-group', async (req: Request, res: Response) => {
+    const user = getUser(req);
+    if (!user.isOwner) { res.status(403).json({ ok: false, error: 'Owner access required' }); return; }
+    const { reminderGroupJid } = req.body;
+    await updateDashboardToken(req.params.token as string, { reminder_group_jid: reminderGroupJid || null });
+    res.json({ ok: true });
   });
 
   // ── Logs ──
@@ -490,35 +618,6 @@ export function createRouter(): Router {
     res.json({ ok: true, data: { deleted } });
   });
 
-  // ── Container stats (CPU/memory) ──
-  router.get('/api/containers/stats', (_req: Request, res: Response) => {
-    try {
-      const raw = execSync(
-        'docker stats --no-stream --format "{{.Name}}\\t{{.CPUPerc}}\\t{{.MemUsage}}\\t{{.PIDs}}" 2>/dev/null',
-        { timeout: 5000 },
-      )
-        .toString()
-        .trim();
-
-      if (!raw) {
-        res.json({ ok: true, data: [] });
-        return;
-      }
-
-      const containers = raw
-        .split('\n')
-        .filter((l) => l.includes('nanoclaw'))
-        .map((line) => {
-          const [name, cpu, mem, pids] = line.split('\t');
-          return { name, cpu, mem, pids: parseInt(pids || '0', 10) };
-        });
-
-      res.json({ ok: true, data: containers });
-    } catch {
-      res.json({ ok: true, data: [] });
-    }
-  });
-
   // ── Context usage (reads from Claude Code's statusLine output) ──
   router.get(
     '/api/groups/:jid/context',
@@ -538,7 +637,18 @@ export function createRouter(): Router {
           'context.json',
         );
         if (!fs.existsSync(contextFile)) {
-          res.json({ ok: true, data: empty });
+          // Fall back to in-memory cache, then DB
+          let cached = contextCache[group.folder];
+          if (!cached) {
+            try {
+              const dbVal = await getRouterState(`context_pct:${group.folder}`);
+              if (dbVal) {
+                cached = JSON.parse(dbVal);
+                contextCache[group.folder] = cached!;
+              }
+            } catch { /* ignore */ }
+          }
+          res.json({ ok: true, data: cached || empty });
           return;
         }
         const ctx = JSON.parse(fs.readFileSync(contextFile, 'utf-8'));
@@ -982,6 +1092,7 @@ export function createRouter(): Router {
         description: 'Clear context and start a fresh session',
       },
       { command: 'compact', description: 'Force context compaction' },
+      { command: 'context', description: 'Show context window usage' },
     ];
     const skillDirs = [
       path.resolve(process.cwd(), 'container', 'skills'),

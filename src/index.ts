@@ -1,9 +1,9 @@
+import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
 import {
   ASSISTANT_NAME,
-  CREDENTIAL_PROXY_PORT,
   DASHBOARD_PORT,
   DASHBOARD_TOKEN,
   DATA_DIR,
@@ -14,8 +14,7 @@ import {
   TRANSIENT_CLOSE_DELAY_MS,
   TRIGGER_PATTERN,
 } from './config.js';
-import { startCredentialProxy } from './credential-proxy.js';
-import { dashboardEvents } from './dashboard/events.js';
+import { dashboardEvents, contextCache } from './dashboard/events.js';
 import {
   setChatSendFn,
   setActiveGroupsFn,
@@ -30,22 +29,18 @@ import {
   getRegisteredChannelNames,
 } from './channels/registry.js';
 import {
-  ContainerOutput,
-  runContainerAgent,
   writeGroupsSnapshot,
+  writeRemindersSnapshot,
   writeTasksSnapshot,
-} from './container-runner.js';
-import {
-  cleanupOrphans,
-  ensureContainerRuntimeRunning,
-  PROXY_BIND_HOST,
-} from './container-runtime.js';
+  writeTodosSnapshot,
+} from './ipc-snapshots.js';
 import {
   ensureSession as ensureTmuxSession,
   recoverSessions as recoverTmuxSessions,
   runTmuxAgent,
   TmuxStreamEvent,
 } from './tmux-runner.js';
+import { handleSessionCommand } from './session-commands.js';
 import {
   getAllChats,
   getAllMessagesSince,
@@ -55,6 +50,8 @@ import {
   getMessagesSince,
   getNewMessages,
   getRouterState,
+  getTodosByUser,
+  getRemindersByUser,
   initDatabase,
   setRegisteredGroup,
   setRouterState,
@@ -79,7 +76,7 @@ import {
 } from './sender-allowlist.js';
 import { MemoryService } from './memory.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { AgentOutput, Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 import { initPushService, sendPushNotification } from './push.js';
 
@@ -154,7 +151,7 @@ async function registerGroup(
  * Returns groups ordered by most recent activity.
  */
 export async function getAvailableGroups(): Promise<
-  import('./container-runner.js').AvailableGroup[]
+  import('./ipc-snapshots.js').AvailableGroup[]
 > {
   const chats = await getAllChats();
   const registeredJids = new Set(Object.keys(registeredGroups));
@@ -212,6 +209,55 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     );
     if (!hasTrigger) return true;
   }
+
+  // Intercept session commands (/context, /compact, /new)
+  const cmdResult = await handleSessionCommand({
+    missedMessages,
+    isMainGroup,
+    groupName: group.name,
+    triggerPattern: TRIGGER_PATTERN,
+    timezone: TIMEZONE,
+    deps: {
+      sendMessage: async (text) => {
+        if (channel) await channel.sendMessage(chatJid, text);
+        else {
+          dashboardEvents.emitEvent('message:new', {
+            chatJid,
+            sender: group.name,
+            senderName: group.name,
+            content: text,
+            timestamp: new Date().toISOString(),
+            isFromMe: true,
+          });
+          await storeMessage({
+            id: `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            chat_jid: chatJid,
+            sender: group.name,
+            sender_name: group.name,
+            content: text,
+            timestamp: new Date().toISOString(),
+            is_from_me: true,
+            is_bot_message: true,
+          }).catch(() => {});
+        }
+      },
+      setTyping: async (typing) => { await channel?.setTyping?.(chatJid, typing); },
+      runAgent: async (prompt, onOutput) => runAgent(group, prompt, chatJid, onOutput),
+      advanceCursor: (timestamp) => {
+        lastAgentTimestamp[chatJid] = timestamp;
+        saveState().catch(() => {});
+      },
+      formatMessages: (msgs, tz) => formatMessages(msgs, tz, group.folder),
+      canSenderInteract: () => true,
+      clearSession: async () => {
+        delete sessions[group.folder];
+        await setSession(group.folder, '').catch(() => {});
+        const tmuxName = `nanoclaw-${group.folder}`;
+        try { execSync(`/opt/homebrew/bin/tmux kill-session -t ${tmuxName} 2>/dev/null`); } catch {}
+      },
+    },
+  });
+  if (cmdResult.handled) return cmdResult.success;
 
   const rawPrompt = formatMessages(missedMessages, TIMEZONE, group.folder);
 
@@ -334,6 +380,27 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       resetIdleTimer();
     }
 
+    // Emit context usage — always, even without result text
+    if (result.usage) {
+      const totalTokens =
+        (result.usage.input_tokens ?? 0) +
+        (result.usage.cache_creation_input_tokens ?? 0) +
+        (result.usage.cache_read_input_tokens ?? 0);
+      const contextWindowSize = 1_000_000; // Claude Opus 4.6 1M context
+      const percent = Math.round((totalTokens / contextWindowSize) * 100);
+      if (percent > 0) {
+        const sizeKB = Math.round((totalTokens * 4) / 1024);
+        dashboardEvents.emitEvent('context:update', {
+          groupFolder: group.folder,
+          percent,
+          sizeKB,
+        });
+        contextCache[group.folder] = { percent, sizeKB, tokens: totalTokens };
+        // Persist to DB so it survives restarts
+        setRouterState(`context_pct:${group.folder}`, JSON.stringify({ percent, sizeKB, tokens: totalTokens })).catch(() => {});
+      }
+    }
+
     if (result.status === 'success') {
       queue.notifyIdle(chatJid);
       dashboardEvents.emitEvent('agent:idle', {
@@ -383,7 +450,7 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
-  onOutput?: (output: ContainerOutput) => Promise<void>,
+  onOutput?: (output: AgentOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   const sessionId = group.isTransient ? undefined : sessions[group.folder];
@@ -404,6 +471,20 @@ async function runAgent(
     })),
   );
 
+  // Write todos and reminders snapshots (scoped by user)
+  const userId = group.memoryUserId || 'venky';
+  const todos = await getTodosByUser(userId, true);
+  writeTodosSnapshot(group.folder, todos.map((t) => ({
+    id: t.id, user_id: t.user_id, title: t.title, data: t.data,
+    status: t.status, priority: t.priority, due_date: t.due_date, created_at: t.created_at,
+  })));
+  const reminders = await getRemindersByUser(userId);
+  writeRemindersSnapshot(group.folder, reminders.map((r) => ({
+    id: r.id, user_id: r.user_id, title: r.title, data: r.data,
+    remind_at: r.remind_at, recurrence: r.recurrence, status: r.status,
+    snoozed_until: r.snoozed_until, created_at: r.created_at,
+  })));
+
   // Update available groups snapshot (main group only can see all groups)
   const availableGroups = await getAvailableGroups();
   writeGroupsSnapshot(
@@ -413,24 +494,10 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
-  // Wrap onOutput to track session ID from streamed results
-  const wrappedOnOutput = onOutput
-    ? async (output: ContainerOutput) => {
-        if (output.newSessionId && !group.isTransient) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId).catch((err) =>
-            logger.warn({ err }, 'setSession failed'),
-          );
-        }
-        await onOutput(output);
-      }
-    : undefined;
-
   const agentStart = Date.now();
 
-  // Tmux mode: run claude-lts -p in a persistent tmux session
-  if (group.mode === 'tmux') {
-    try {
+  // All groups use tmux mode
+  try {
       ensureTmuxSession(group, chatJid);
 
       // Emit agent:spawn so dashboard shows activity indicator
@@ -502,6 +569,7 @@ async function runAgent(
         handleStreamEvent,
       );
 
+
       // Emit agent:exit so dashboard hides activity indicator
       dashboardEvents.emitEvent('agent:exit', {
         groupName: group.name,
@@ -526,6 +594,14 @@ async function runAgent(
           result: output.result,
           newSessionId: output.newSessionId,
           streamed: true,
+          usage: output.usage,
+        });
+      } else if (output.usage && onOutput) {
+        // Even without result, emit usage for context%
+        await onOutput({
+          status: output.status,
+          result: null,
+          usage: output.usage,
         });
       }
 
@@ -536,74 +612,9 @@ async function runAgent(
         groupFolder: group.folder,
         duration: Date.now() - agentStart,
       });
-      logger.error({ group: group.name, err }, 'Tmux agent error');
+      logger.error({ group: group.name, err }, 'Agent error');
       return 'error';
     }
-  }
-
-  // Container mode: run in Docker container (existing path)
-  try {
-    const output = await runContainerAgent(
-      group,
-      {
-        prompt,
-        sessionId,
-        groupFolder: group.folder,
-        chatJid,
-        isMain,
-        assistantName: ASSISTANT_NAME,
-        useCliMode: group.containerConfig?.projectReadWrite === true,
-      },
-      (proc, containerName) => {
-        dashboardEvents.emitEvent('agent:spawn', {
-          groupName: group.name,
-          groupFolder: group.folder,
-          containerName,
-        });
-        queue.registerProcess(chatJid, proc, containerName, group.folder);
-      },
-      wrappedOnOutput,
-      (line, stream) => {
-        dashboardEvents.emitEvent('container:log', {
-          groupName: group.name,
-          groupFolder: group.folder,
-          line,
-          stream,
-        });
-      },
-    );
-
-    dashboardEvents.emitEvent('agent:exit', {
-      groupName: group.name,
-      groupFolder: group.folder,
-      duration: Date.now() - agentStart,
-    });
-
-    if (output.newSessionId && !group.isTransient) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId).catch((err) =>
-        logger.warn({ err }, 'setSession failed'),
-      );
-    }
-
-    if (output.status === 'error') {
-      logger.error(
-        { group: group.name, error: output.error },
-        'Container agent error',
-      );
-      return 'error';
-    }
-
-    return 'success';
-  } catch (err) {
-    dashboardEvents.emitEvent('agent:exit', {
-      groupName: group.name,
-      groupFolder: group.folder,
-      duration: Date.now() - agentStart,
-    });
-    logger.error({ group: group.name, err }, 'Agent error');
-    return 'error';
-  }
 }
 
 async function startMessageLoop(): Promise<void> {
@@ -782,11 +793,6 @@ async function recoverPendingMessages(): Promise<void> {
   }
 }
 
-function ensureContainerSystemRunning(): void {
-  ensureContainerRuntimeRunning();
-  cleanupOrphans();
-}
-
 const RESTART_FLAG_PATH = path.join(DATA_DIR, 'restart-flag.json');
 
 /** Store + broadcast a service message to every registered group. */
@@ -843,7 +849,6 @@ async function checkAndSendOnlineNotification(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  ensureContainerSystemRunning();
   // Recover existing tmux sessions (they survive DevenClaw restarts)
   const recoveredTmux = recoverTmuxSessions();
   if (recoveredTmux.length > 0) {
@@ -861,12 +866,6 @@ async function main(): Promise<void> {
     .map((g) => g.folder);
   memoryService.setOwnerGroups(ownerFolders);
   restoreRemoteControl();
-
-  // Start credential proxy (containers route API calls through this)
-  const proxyServer = await startCredentialProxy(
-    CREDENTIAL_PROXY_PORT,
-    PROXY_BIND_HOST,
-  );
 
   // Start Mission Control dashboard (if token is configured)
   let dashServer: import('http').Server | null = null;
@@ -979,7 +978,6 @@ async function main(): Promise<void> {
       '🔄 DevenClaw is restarting, back in a moment...',
     ).catch(() => {});
     writeRestartFlag(signal);
-    proxyServer.close();
     dashServer?.close();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();

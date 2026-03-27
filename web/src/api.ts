@@ -108,6 +108,44 @@ export const api = {
   resumeTask: (id: string) =>
     request<ApiResponse<{ id: string; status: string }>>(`/api/tasks/${id}/resume`, { method: 'POST' }),
 
+  deleteTask: (id: string) =>
+    request<ApiResponse<null>>(`/api/tasks/${id}`, { method: 'DELETE' }),
+
+  getTaskLogs: (id: string) =>
+    request<ApiResponse<Array<{ task_id: string; run_at: string; duration_ms: number; status: string; result: string | null; error: string | null }>>>(`/api/tasks/${id}/logs`),
+
+  // Todos
+  getTodos: () =>
+    request<ApiResponse<Array<{ id: string; user_id: string; title: string; data: string | null; status: string; priority: string; due_date: string | null; created_by: string; created_at: string; updated_at: string }>>>('/api/todos'),
+
+  createTodo: (todo: { title: string; data?: string; priority?: string; due_date?: string }) =>
+    request<ApiResponse<any>>('/api/todos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(todo) }),
+
+  updateTodo: (id: string, updates: Record<string, any>) =>
+    request<ApiResponse<any>>(`/api/todos/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) }),
+
+  deleteTodo: (id: string) =>
+    request<ApiResponse<null>>(`/api/todos/${id}`, { method: 'DELETE' }),
+
+  // Reminders
+  getReminders: () =>
+    request<ApiResponse<Array<{ id: string; user_id: string; title: string; data: string | null; remind_at: string; recurrence: string | null; status: string; snoozed_until: string | null; created_by: string; created_at: string }>>>('/api/reminders'),
+
+  createReminder: (reminder: { title: string; data?: string; remind_at: string; recurrence?: string }) =>
+    request<ApiResponse<any>>('/api/reminders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reminder) }),
+
+  updateReminder: (id: string, updates: Record<string, any>) =>
+    request<ApiResponse<any>>(`/api/reminders/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) }),
+
+  snoozeReminder: (id: string, snooze_until: string) =>
+    request<ApiResponse<any>>(`/api/reminders/${id}/snooze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ snooze_until }) }),
+
+  dismissReminder: (id: string) =>
+    request<ApiResponse<any>>(`/api/reminders/${id}/dismiss`, { method: 'POST' }),
+
+  deleteReminder: (id: string) =>
+    request<ApiResponse<null>>(`/api/reminders/${id}`, { method: 'DELETE' }),
+
   getLogs: (folder: string) =>
     request<ApiResponse<Array<{ name: string; content: string }>>>(`/api/logs/${folder}`),
 
@@ -122,6 +160,9 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(settings),
     }),
+
+  updateTokenReminderGroup: (token: string, reminderGroupJid: string | null) =>
+    request<ApiResponse<any>>(`/api/tokens/${encodeURIComponent(token)}/reminder-group`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reminderGroupJid }) }),
 
   getContainerStats: () =>
     request<ApiResponse<Array<{ name: string; cpu: string; mem: string; pids: number }>>>('/api/containers/stats'),

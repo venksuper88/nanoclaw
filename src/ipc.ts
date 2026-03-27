@@ -4,13 +4,20 @@ import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
-import { AvailableGroup } from './container-runner.js';
+import { AvailableGroup } from './ipc-snapshots.js';
 import {
   createTask,
+  createTodo,
   deleteTask,
+  deleteTodo,
+  deleteReminder,
   getTaskById,
+  getTodoById,
+  getReminderById,
   storeMessage,
   updateTask,
+  updateTodo,
+  updateReminder,
 } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
@@ -275,26 +282,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
 }
 
 export async function processTaskIpc(
-  data: {
-    type: string;
-    taskId?: string;
-    prompt?: string;
-    schedule_type?: string;
-    schedule_value?: string;
-    context_mode?: string;
-    groupFolder?: string;
-    chatJid?: string;
-    targetJid?: string;
-    // For register_group
-    jid?: string;
-    name?: string;
-    folder?: string;
-    trigger?: string;
-    requiresTrigger?: boolean;
-    isTransient?: boolean;
-    containerConfig?: RegisteredGroup['containerConfig'];
-    // For restart_service
-    reason?: string;
+  data: Record<string, any> & { type: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -567,7 +555,6 @@ export async function processTaskIpc(
           folder: data.folder,
           trigger: data.trigger,
           added_at: new Date().toISOString(),
-          containerConfig: data.containerConfig,
           requiresTrigger: data.requiresTrigger,
           isTransient: data.isTransient,
         });
@@ -604,6 +591,119 @@ export async function processTaskIpc(
         }, 1500);
       })();
       break;
+
+    // ── Todos ──
+    case 'add_todo': {
+      const group = registeredGroups[
+        Object.keys(registeredGroups).find(
+          (jid) => registeredGroups[jid].folder === sourceGroup,
+        ) || ''
+      ];
+      const userId = group?.memoryUserId || 'venky';
+      const todoId = `todo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const now = new Date().toISOString();
+      await createTodo({
+        id: todoId,
+        user_id: userId,
+        title: data.title,
+        data: data.data || null,
+        status: 'pending',
+        priority: data.priority || 'medium',
+        due_date: data.due_date ? new Date(data.due_date).toISOString() : null,
+        remind_at: data.remind_at ? new Date(data.remind_at).toISOString() : null,
+        recurrence: data.recurrence || null,
+        reminder_fired_at: null,
+        created_by: sourceGroup,
+        created_at: now,
+        updated_at: now,
+      });
+      logger.info({ todoId, sourceGroup }, 'Todo created via IPC');
+      break;
+    }
+
+    case 'update_todo': {
+      if (data.todoId) {
+        const todo = await getTodoById(data.todoId);
+        if (todo) {
+          const updates: Record<string, string> = {};
+          if (data.title) updates.title = data.title;
+          if (data.data) updates.data = data.data;
+          if (data.status) updates.status = data.status;
+          if (data.priority) updates.priority = data.priority;
+          if (data.due_date) updates.due_date = data.due_date;
+          await updateTodo(data.todoId, updates);
+          logger.info({ todoId: data.todoId, sourceGroup }, 'Todo updated via IPC');
+        }
+      }
+      break;
+    }
+
+    case 'delete_todo': {
+      if (data.todoId) {
+        await deleteTodo(data.todoId);
+        logger.info({ todoId: data.todoId, sourceGroup }, 'Todo deleted via IPC');
+      }
+      break;
+    }
+
+    // ── Reminders (creates a todo with remind_at) ──
+    case 'add_reminder': {
+      const remGroup = registeredGroups[
+        Object.keys(registeredGroups).find(
+          (jid) => registeredGroups[jid].folder === sourceGroup,
+        ) || ''
+      ];
+      const remUserId = remGroup?.memoryUserId || 'venky';
+      const remTodoId = `todo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const remNow = new Date().toISOString();
+      const remindAtUtc = data.remind_at ? new Date(data.remind_at).toISOString() : remNow;
+      await createTodo({
+        id: remTodoId,
+        user_id: remUserId,
+        title: data.title,
+        data: data.data || null,
+        status: 'pending',
+        priority: 'medium',
+        due_date: null,
+        remind_at: remindAtUtc,
+        recurrence: data.recurrence || null,
+        reminder_fired_at: null,
+        created_by: sourceGroup,
+        created_at: remNow,
+        updated_at: remNow,
+      });
+      logger.info({ todoId: remTodoId, sourceGroup }, 'Reminder todo created via IPC');
+      break;
+    }
+
+    case 'update_reminder': {
+      if (data.reminderId) {
+        const rem = await getReminderById(data.reminderId);
+        if (rem) {
+          const updates: Record<string, string> = {};
+          if (data.title) updates.title = data.title;
+          if (data.data) updates.data = data.data;
+          if (data.remind_at) updates.remind_at = data.remind_at;
+          if (data.recurrence) updates.recurrence = data.recurrence;
+          await updateReminder(data.reminderId, updates);
+        }
+      }
+      break;
+    }
+
+    case 'dismiss_reminder': {
+      if (data.reminderId) {
+        await updateReminder(data.reminderId, { status: 'dismissed' });
+      }
+      break;
+    }
+
+    case 'snooze_reminder': {
+      if (data.reminderId && data.snooze_until) {
+        await updateReminder(data.reminderId, { status: 'snoozed', snoozed_until: data.snooze_until });
+      }
+      break;
+    }
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');

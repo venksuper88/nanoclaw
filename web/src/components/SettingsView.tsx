@@ -25,6 +25,7 @@ interface TokenInfo {
   canSend: boolean;
   isOwner: boolean;
   createdAt: string;
+  reminderGroupJid: string | null;
 }
 interface ScopeDef {
   name: string;
@@ -517,13 +518,27 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                     {t.role || 'no role'} &middot; {t.token} &middot; {fmtDate(t.createdAt)}
                   </div>
                   {t.allowedGroups.length > 0 && (
-                    <div style={{ fontSize: 11, color: 'var(--accent)', marginTop: 2 }}>
+                    <div style={{ fontSize: 11, color: 'var(--purple)', marginTop: 2 }}>
                       {t.allowedGroups.map(jid => {
                         const g = groups.find(g => g.jid === jid);
                         return g?.name || jid;
                       }).join(', ')}
                     </div>
                   )}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, fontSize: 12 }}>
+                    <span style={{ color: 'var(--text3)' }}>Reminders →</span>
+                    <select
+                      style={{ fontSize: 12, padding: '2px 6px', borderRadius: 6, border: '1px solid var(--separator)', background: 'var(--bg)', color: 'var(--text)' }}
+                      value={t.reminderGroupJid || ''}
+                      onChange={async (e) => {
+                        await api.updateTokenReminderGroup(t.tokenFull, e.target.value || null);
+                        api.getTokens().then(r => { if (r.ok) setTokens(r.data); });
+                      }}
+                    >
+                      <option value="">Auto (main group)</option>
+                      {groups.map(g => <option key={g.jid} value={g.jid}>{g.name}</option>)}
+                    </select>
+                  </div>
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                   <button

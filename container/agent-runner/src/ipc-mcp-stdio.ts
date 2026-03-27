@@ -367,6 +367,230 @@ Good examples:
   },
 );
 
+// ── Todos ──
+
+server.tool(
+  'add_todo',
+  'Add a todo item for the user. Supports priority levels and optional due dates. The todo will appear in the Todos tab of Mission Control.',
+  {
+    title: z.string().describe('Short description of the todo'),
+    data: z.string().optional().describe('Additional notes or context (supports markdown)'),
+    priority: z.enum(['low', 'medium', 'high']).optional().describe('Priority level (default: medium)'),
+    due_date: z.string().optional().describe('Due date as ISO timestamp (e.g., "2026-03-27T09:00:00Z")'),
+  },
+  async (args) => {
+    writeIpcFile(TASKS_DIR, {
+      type: 'add_todo',
+      title: args.title,
+      data: args.data,
+      priority: args.priority || 'medium',
+      due_date: args.due_date,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: `Todo added: "${args.title}" [View Todos](#todos)` }] };
+  },
+);
+
+server.tool(
+  'update_todo',
+  'Update an existing todo item — change title, notes, status, priority, or due date.',
+  {
+    todo_id: z.string().describe('The todo ID to update'),
+    title: z.string().optional().describe('New title'),
+    data: z.string().optional().describe('New notes/context'),
+    status: z.enum(['pending', 'in_progress', 'done']).optional().describe('New status'),
+    priority: z.enum(['low', 'medium', 'high']).optional().describe('New priority'),
+    due_date: z.string().optional().describe('New due date (ISO timestamp)'),
+  },
+  async (args) => {
+    writeIpcFile(TASKS_DIR, {
+      type: 'update_todo',
+      todoId: args.todo_id,
+      title: args.title,
+      data: args.data,
+      status: args.status,
+      priority: args.priority,
+      due_date: args.due_date,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: `Todo ${args.todo_id} updated.` }] };
+  },
+);
+
+server.tool(
+  'complete_todo',
+  'Mark a todo as done.',
+  {
+    todo_id: z.string().describe('The todo ID to complete'),
+  },
+  async (args) => {
+    writeIpcFile(TASKS_DIR, {
+      type: 'update_todo',
+      todoId: args.todo_id,
+      status: 'done',
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: `Todo ${args.todo_id} marked as done.` }] };
+  },
+);
+
+server.tool(
+  'delete_todo',
+  'Permanently delete a todo item.',
+  {
+    todo_id: z.string().describe('The todo ID to delete'),
+  },
+  async (args) => {
+    writeIpcFile(TASKS_DIR, {
+      type: 'delete_todo',
+      todoId: args.todo_id,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: `Todo ${args.todo_id} deleted.` }] };
+  },
+);
+
+server.tool(
+  'list_todos',
+  "List the user's todos. Returns all non-completed todos by default.",
+  {
+    include_completed: z.boolean().optional().describe('Include completed todos (default: false)'),
+  },
+  async (args) => {
+    // Read from snapshot file written by host
+    const snapshotFile = path.join(IPC_DIR, 'current_todos.json');
+    if (!fs.existsSync(snapshotFile)) {
+      return { content: [{ type: 'text' as const, text: 'No todos found.' }] };
+    }
+    const todos = JSON.parse(fs.readFileSync(snapshotFile, 'utf-8'));
+    const filtered = args.include_completed ? todos : todos.filter((t: any) => t.status !== 'done');
+    if (filtered.length === 0) {
+      return { content: [{ type: 'text' as const, text: 'No todos found.' }] };
+    }
+    const lines = filtered.map((t: any) => {
+      const check = t.status === 'done' ? '✅' : t.status === 'in_progress' ? '🔄' : '⬜';
+      const pri = t.priority === 'high' ? '🔴' : t.priority === 'medium' ? '🟡' : '🟢';
+      const due = t.due_date ? ` (due: ${t.due_date})` : '';
+      return `${check} ${pri} **${t.title}**${due}\n   ID: \`${t.id}\``;
+    });
+    return { content: [{ type: 'text' as const, text: lines.join('\n\n') }] };
+  },
+);
+
+// ── Reminders ──
+
+server.tool(
+  'add_reminder',
+  'Set a reminder for the user. The reminder will fire at the specified time and notify the user via chat and push notification.',
+  {
+    title: z.string().describe('What to remind about'),
+    data: z.string().optional().describe('Additional context (supports markdown)'),
+    remind_at: z.string().describe('When to remind — ISO timestamp (e.g., "2026-03-27T09:00:00+05:30")'),
+    recurrence: z.string().optional().describe('Optional cron expression for recurring reminders (e.g., "0 9 * * *" for daily at 9 AM)'),
+  },
+  async (args) => {
+    writeIpcFile(TASKS_DIR, {
+      type: 'add_reminder',
+      title: args.title,
+      data: args.data,
+      remind_at: args.remind_at,
+      recurrence: args.recurrence,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: `Reminder set: "${args.title}" at ${args.remind_at} [View Todos](#todos)` }] };
+  },
+);
+
+server.tool(
+  'update_reminder',
+  'Update an existing reminder.',
+  {
+    reminder_id: z.string().describe('The reminder ID to update'),
+    title: z.string().optional().describe('New title'),
+    data: z.string().optional().describe('New context'),
+    remind_at: z.string().optional().describe('New reminder time (ISO timestamp)'),
+    recurrence: z.string().optional().describe('New cron expression'),
+  },
+  async (args) => {
+    writeIpcFile(TASKS_DIR, {
+      type: 'update_reminder',
+      reminderId: args.reminder_id,
+      title: args.title,
+      data: args.data,
+      remind_at: args.remind_at,
+      recurrence: args.recurrence,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: `Reminder ${args.reminder_id} updated.` }] };
+  },
+);
+
+server.tool(
+  'dismiss_reminder',
+  'Dismiss a reminder (mark as done, no more notifications).',
+  {
+    reminder_id: z.string().describe('The reminder ID to dismiss'),
+  },
+  async (args) => {
+    writeIpcFile(TASKS_DIR, {
+      type: 'dismiss_reminder',
+      reminderId: args.reminder_id,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: `Reminder ${args.reminder_id} dismissed.` }] };
+  },
+);
+
+server.tool(
+  'snooze_reminder',
+  'Snooze a reminder to a later time.',
+  {
+    reminder_id: z.string().describe('The reminder ID to snooze'),
+    snooze_until: z.string().describe('New time to be reminded — ISO timestamp'),
+  },
+  async (args) => {
+    writeIpcFile(TASKS_DIR, {
+      type: 'snooze_reminder',
+      reminderId: args.reminder_id,
+      snooze_until: args.snooze_until,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: `Reminder ${args.reminder_id} snoozed until ${args.snooze_until}.` }] };
+  },
+);
+
+server.tool(
+  'list_reminders',
+  "List the user's active and snoozed reminders.",
+  {},
+  async () => {
+    const snapshotFile = path.join(IPC_DIR, 'current_reminders.json');
+    if (!fs.existsSync(snapshotFile)) {
+      return { content: [{ type: 'text' as const, text: 'No reminders found.' }] };
+    }
+    const reminders = JSON.parse(fs.readFileSync(snapshotFile, 'utf-8'));
+    const active = reminders.filter((r: any) => r.status === 'active' || r.status === 'snoozed');
+    if (active.length === 0) {
+      return { content: [{ type: 'text' as const, text: 'No active reminders.' }] };
+    }
+    const lines = active.map((r: any) => {
+      const icon = r.status === 'snoozed' ? '💤' : '🔔';
+      const time = r.status === 'snoozed' ? r.snoozed_until : r.remind_at;
+      const rec = r.recurrence ? ` (recurring: ${r.recurrence})` : '';
+      return `${icon} **${r.title}** — ${time}${rec}\n   ID: \`${r.id}\``;
+    });
+    return { content: [{ type: 'text' as const, text: lines.join('\n\n') }] };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

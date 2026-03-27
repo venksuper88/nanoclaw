@@ -19,6 +19,7 @@ export interface TokenUser {
   canSend: boolean;
   isOwner: boolean;
   createdAt: string;
+  reminderGroupJid: string | null;
 }
 
 /**
@@ -37,6 +38,7 @@ export async function initDashboardTokens(): Promise<void> {
       can_send: 1,
       is_owner: 1,
       created_at: new Date().toISOString(),
+      reminder_group_jid: null,
     });
     logger.info('Owner token registered in dashboard_tokens');
   }
@@ -57,6 +59,7 @@ export async function resolveToken(token: string): Promise<TokenUser | null> {
     canSend: row.can_send === 1,
     isOwner: row.is_owner === 1,
     createdAt: row.created_at,
+    reminderGroupJid: row.reminder_group_jid || null,
   };
 }
 
@@ -86,6 +89,7 @@ export async function createToken(
     can_send: canSend ? 1 : 0,
     is_owner: 0,
     created_at: new Date().toISOString(),
+    reminder_group_jid: null,
   });
   return token;
 }
@@ -103,6 +107,7 @@ export async function listTokens(): Promise<TokenUser[]> {
     canSend: r.can_send === 1,
     isOwner: r.is_owner === 1,
     createdAt: r.created_at,
+    reminderGroupJid: r.reminder_group_jid || null,
   }));
 }
 
