@@ -53,6 +53,7 @@ import {
   getTodosByUser,
   getRemindersByUser,
   initDatabase,
+  recordTokenUsage,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -399,6 +400,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // Persist to DB so it survives restarts
         setRouterState(`context_pct:${group.folder}`, JSON.stringify({ percent, sizeKB, tokens: totalTokens })).catch(() => {});
       }
+      // Record token usage for analytics
+      recordTokenUsage(group.folder, result.usage).catch(() => {});
     }
 
     if (result.status === 'success') {

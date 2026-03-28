@@ -301,12 +301,15 @@ server.tool(
   'register_group',
   `Register a new chat/group so the agent can respond to messages there. Main group only.
 
-Use available_groups.json to find the JID for a group. The folder name must be channel-prefixed: "{channel}_{group-name}" (e.g., "whatsapp_family-chat", "telegram_dev-team", "discord_general"). Use lowercase with hyphens for the group name part.`,
+Use available_groups.json to find the JID for a group. The folder name must be channel-prefixed: "{channel}_{group-name}" (e.g., "whatsapp_family-chat", "telegram_dev-team", "discord_general", "dashboard_agent-name"). Use lowercase with hyphens for the group name part.
+
+For project-specific agents, use the workDir parameter to set the agent's working directory (e.g., "~/Projects/TrainIdle/.agents/build/"). The agent will inherit the project's root CLAUDE.md automatically.`,
   {
-    jid: z.string().describe('The chat JID (e.g., "120363336345536173@g.us", "tg:-1001234567890", "dc:1234567890123456")'),
+    jid: z.string().describe('The chat JID (e.g., "dash:build-agent", "tg:-1001234567890")'),
     name: z.string().describe('Display name for the group'),
-    folder: z.string().describe('Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")'),
+    folder: z.string().describe('Channel-prefixed folder name (e.g., "dashboard_build-agent", "telegram_dev-team")'),
     trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
+    workDir: z.string().optional().describe('Custom working directory (absolute path). For project agents, set to the agent directory (e.g., "/Users/deven/Projects/TrainIdle/.agents/build/")'),
   },
   async (args) => {
     if (!isMain) {
@@ -316,12 +319,13 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       };
     }
 
-    const data = {
+    const data: Record<string, string | undefined> = {
       type: 'register_group',
       jid: args.jid,
       name: args.name,
       folder: args.folder,
       trigger: args.trigger,
+      workDir: args.workDir,
       timestamp: new Date().toISOString(),
     };
 

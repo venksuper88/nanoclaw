@@ -557,6 +557,7 @@ export async function processTaskIpc(
           added_at: new Date().toISOString(),
           requiresTrigger: data.requiresTrigger,
           isTransient: data.isTransient,
+          workDir: data.workDir || undefined,
         });
       } else {
         logger.warn(

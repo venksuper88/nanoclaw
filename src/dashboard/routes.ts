@@ -43,6 +43,7 @@ import {
   getDraft,
   setDraft,
   getRouterState,
+  getTokenUsageSummary,
 } from '../db.js';
 import { ASSISTANT_NAME, GROUPS_DIR } from '../config.js';
 import { dashboardEvents, contextCache } from './events.js';
@@ -573,6 +574,14 @@ export function createRouter(): Router {
     });
   });
 
+  // ── Token Usage Analytics ──
+  router.get('/api/token-usage', async (req: Request, res: Response) => {
+    const days = req.query.days ? Number(req.query.days) : undefined;
+    const folder = req.query.folder as string | undefined;
+    const summary = await getTokenUsageSummary(folder, days);
+    res.json({ ok: true, data: summary });
+  });
+
   // ── Token management (owner only) ──
   router.get('/api/tokens', async (req: Request, res: Response) => {
     const user = getUser(req);
@@ -761,8 +770,9 @@ export function createRouter(): Router {
       if (idleTimeoutMinutes !== undefined)
         updated.idleTimeoutMinutes = idleTimeoutMinutes;
       if (allowedSkills !== undefined) updated.allowedSkills = allowedSkills;
-      if (mode !== undefined && (mode === 'container' || mode === 'tmux'))
+      if (mode !== undefined && mode === 'tmux')
         updated.mode = mode;
+      if (req.body.workDir !== undefined) updated.workDir = req.body.workDir || undefined;
 
       await setRegisteredGroup(jid, updated);
       res.json({

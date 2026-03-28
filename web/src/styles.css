@@ -1328,6 +1328,88 @@ select {
   margin-top: 2px;
 }
 
+/* Token Usage */
+.usage-period-pills {
+  display: flex;
+  gap: 4px;
+}
+.period-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid #e0d8f0;
+  background: white;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text2);
+  cursor: pointer;
+}
+.period-pill.active {
+  background: var(--purple);
+  color: white;
+  border-color: var(--purple);
+}
+.usage-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 0 16px 8px;
+}
+.usage-total {
+  font-family: 'Manrope', sans-serif;
+  font-weight: 800;
+  font-size: 20px;
+  color: var(--text1);
+}
+.usage-turns {
+  font-size: 13px;
+  color: var(--text2);
+}
+.usage-bars {
+  padding: 0 16px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.usage-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.usage-bar-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text1);
+  min-width: 80px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.usage-bar-track {
+  flex: 1;
+  height: 8px;
+  background: #f3f0f8;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.usage-bar-fill {
+  height: 100%;
+  background: var(--purple);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+.usage-bar-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text2);
+  min-width: 50px;
+  text-align: right;
+}
+.usage-empty {
+  padding: 12px 16px;
+  font-size: 13px;
+  color: var(--text2);
+}
+
 /* ══════════════════════════════
    TASKS VIEW
    ══════════════════════════════ */

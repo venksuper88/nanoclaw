@@ -203,6 +203,14 @@ export const api = {
   getSkills: () =>
     request<ApiResponse<Array<{ name: string; description: string; type: string; folder: string }>>>('/api/skills'),
 
+  getTokenUsage: (days?: number, folder?: string) => {
+    const params = new URLSearchParams();
+    if (days) params.set('days', String(days));
+    if (folder) params.set('folder', folder);
+    const qs = params.toString();
+    return request<ApiResponse<Array<{ group_folder: string; total_input: number; total_cache_creation: number; total_cache_read: number; total_output: number; total_tokens: number; turn_count: number }>>>(`/api/token-usage${qs ? `?${qs}` : ''}`);
+  },
+
   getAnalytics: () =>
     request<ApiResponse<{ groups: Array<{ jid: string; name: string; folder: string; channel: string; totalMessages: number; userMessages: number; botMessages: number; hasSession: boolean; lastActivity: string }>; totalGroups: number; totalTasks: number; activeTasks: number; totalSessions: number }>>('/api/analytics'),
 

@@ -250,6 +250,15 @@ async function createSchema(database: Client): Promise<void> {
     /* column already exists */
   }
 
+  // Add work_dir column for agent-in-project pattern
+  try {
+    await database.execute(
+      `ALTER TABLE registered_groups ADD COLUMN work_dir TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
   try {
     await database.execute(`ALTER TABLE chats ADD COLUMN channel TEXT`);
@@ -276,6 +285,22 @@ async function createSchema(database: Client): Promise<void> {
   } catch {
     /* column already exists */
   }
+
+  // Token usage tracking per group
+  await database.execute(`
+    CREATE TABLE IF NOT EXISTS token_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_folder TEXT NOT NULL,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      recorded_at TEXT NOT NULL
+    )
+  `);
+  await database.execute(
+    `CREATE INDEX IF NOT EXISTS idx_token_usage_folder ON token_usage(group_folder, recorded_at)`,
+  );
 }
 
 export async function initDatabase(): Promise<void> {
@@ -915,8 +940,8 @@ export async function setRegisteredGroup(
     throw new Error(`Invalid group folder "${group.folder}" for JID ${jid}`);
   }
   await db.execute({
-    sql: `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main, is_transient, memory_mode, memory_scopes, memory_user_id, show_in_sidebar, idle_timeout_minutes, allowed_skills, mode)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    sql: `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main, is_transient, memory_mode, memory_scopes, memory_user_id, show_in_sidebar, idle_timeout_minutes, allowed_skills, mode, work_dir)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       jid,
       group.name,
@@ -934,6 +959,7 @@ export async function setRegisteredGroup(
       group.idleTimeoutMinutes ?? null,
       JSON.stringify(group.allowedSkills || []),
       group.mode || 'tmux',
+      group.workDir ?? null,
     ],
   });
 }
@@ -958,6 +984,7 @@ export async function getAllRegisteredGroups(): Promise<
     idle_timeout_minutes: number | null;
     allowed_skills: string | null;
     mode: string | null;
+    work_dir: string | null;
   }>;
   const out: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
@@ -984,6 +1011,7 @@ export async function getAllRegisteredGroups(): Promise<
       idleTimeoutMinutes: row.idle_timeout_minutes ?? undefined,
       allowedSkills: row.allowed_skills ? JSON.parse(row.allowed_skills) : [],
       mode: row.mode || 'tmux',
+      workDir: row.work_dir || undefined,
     };
   }
   return out;
@@ -1219,4 +1247,77 @@ export async function setDraft(
       args: [chatJid],
     });
   }
+}
+
+// ── Token Usage Tracking ──
+
+export async function recordTokenUsage(
+  groupFolder: string,
+  usage: {
+    input_tokens: number;
+    cache_creation_input_tokens: number;
+    cache_read_input_tokens: number;
+    output_tokens: number;
+  },
+): Promise<void> {
+  await db.execute({
+    sql: `INSERT INTO token_usage (group_folder, input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens, recorded_at)
+          VALUES (?, ?, ?, ?, ?, ?)`,
+    args: [
+      groupFolder,
+      usage.input_tokens,
+      usage.cache_creation_input_tokens,
+      usage.cache_read_input_tokens,
+      usage.output_tokens,
+      new Date().toISOString(),
+    ],
+  });
+}
+
+export interface TokenUsageSummary {
+  group_folder: string;
+  total_input: number;
+  total_cache_creation: number;
+  total_cache_read: number;
+  total_output: number;
+  total_tokens: number;
+  turn_count: number;
+}
+
+export async function getTokenUsageSummary(
+  groupFolder?: string,
+  sinceDays?: number,
+): Promise<TokenUsageSummary[]> {
+  let sql = `SELECT group_folder,
+    SUM(input_tokens) as total_input,
+    SUM(cache_creation_tokens) as total_cache_creation,
+    SUM(cache_read_tokens) as total_cache_read,
+    SUM(output_tokens) as total_output,
+    SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as total_tokens,
+    COUNT(*) as turn_count
+    FROM token_usage WHERE 1=1`;
+  const args: InValue[] = [];
+
+  if (groupFolder) {
+    sql += ' AND group_folder = ?';
+    args.push(groupFolder);
+  }
+  if (sinceDays) {
+    const since = new Date(Date.now() - sinceDays * 86400000).toISOString();
+    sql += ' AND recorded_at >= ?';
+    args.push(since);
+  }
+
+  sql += ' GROUP BY group_folder ORDER BY total_tokens DESC';
+
+  const result = await db.execute({ sql, args });
+  return result.rows.map((r) => ({
+    group_folder: r.group_folder as string,
+    total_input: Number(r.total_input) || 0,
+    total_cache_creation: Number(r.total_cache_creation) || 0,
+    total_cache_read: Number(r.total_cache_read) || 0,
+    total_output: Number(r.total_output) || 0,
+    total_tokens: Number(r.total_tokens) || 0,
+    turn_count: Number(r.turn_count) || 0,
+  }));
 }
