@@ -331,19 +331,6 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
     if (inputRef.current) (inputRef.current as any).innerText = '';
     if (selectedJid) api.setDraft(selectedJid, '').catch(() => {});
 
-    // Handle built-in dashboard commands
-    if (t === '/new' && !file) {
-      setSending(true);
-      try {
-        await api.killSession(selectedJid);
-        addSystemMessage('Session cleared. Starting fresh.');
-      } catch {
-        addSystemMessage('Failed to clear session.');
-      }
-      setSending(false);
-      (inputRef.current as any)?.focus();
-      return;
-    }
     setSending(true);
 
     // Upload file first if staged
