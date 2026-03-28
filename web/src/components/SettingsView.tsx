@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { getSocket } from '../socket';
 import type { Group } from '../App';
 
 interface LogEntry { name: string; content: string; }
@@ -34,17 +33,8 @@ interface ScopeDef {
 }
 
 export function SettingsView({ groups }: { groups: Group[] }) {
-  const [section, setSection] = useState<'groups' | 'tokens' | 'mem0' | 'logs'>('groups');
-  const [folder, setFolder] = useState(() => (groups.find(g => g.isMain) || groups[0])?.folder || '');
+  const [section, setSection] = useState<'groups' | 'tokens' | 'mem0'>('groups');
 
-  // When groups load async, set default folder to main group if not yet set
-  useEffect(() => {
-    if (!folder && groups.length > 0) {
-      setFolder((groups.find(g => g.isMain) || groups[0]).folder);
-    }
-  }, [groups, folder]);
-
-  const [containerLogs, setContainerLogs] = useState<Record<string, Array<{ line: string; stream: 'stdout' | 'stderr'; ts: string }>>>({});
   const [mem0, setMem0] = useState<Mem0Stats | null>(null);
   const [isOwner, setIsOwner] = useState(false);
   const [tokens, setTokens] = useState<TokenInfo[]>([]);
@@ -80,11 +70,7 @@ export function SettingsView({ groups }: { groups: Group[] }) {
     }).catch(() => {});
     api.getSkills().then(r => {
       if (r.ok) {
-        // Only container skills (folder starts with container/skills/)
-        const containerSkills = r.data
-          .filter((s: { folder: string }) => s.folder.startsWith('container/skills/'))
-          .map((s: { folder: string }) => s.folder.replace('container/skills/', ''));
-        setAvailableSkills(containerSkills);
+        setAvailableSkills(r.data.map((s: { name: string }) => s.name));
       }
     }).catch(() => {});
   }, []);
@@ -105,18 +91,6 @@ export function SettingsView({ groups }: { groups: Group[] }) {
     }
   }, [section, isOwner]);
 
-  // Live container logs
-  useEffect(() => {
-    const socket = getSocket();
-    socket.on('container:log', (d: { groupFolder: string; line: string; stream: 'stdout' | 'stderr' }) => {
-      setContainerLogs(prev => {
-        const existing = prev[d.groupFolder] || [];
-        const entry = { line: d.line, stream: d.stream, ts: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) };
-        return { ...prev, [d.groupFolder]: [...existing, entry].slice(-10) };
-      });
-    });
-    return () => { socket.off('container:log'); };
-  }, []);
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
@@ -203,7 +177,6 @@ export function SettingsView({ groups }: { groups: Group[] }) {
           {isOwner && <button className={`seg-btn ${section === 'groups' ? 'active' : ''}`} onClick={() => setSection('groups')}>Groups</button>}
           {isOwner && <button className={`seg-btn ${section === 'tokens' ? 'active' : ''}`} onClick={() => setSection('tokens')}>Access</button>}
           <button className={`seg-btn ${section === 'mem0' ? 'active' : ''}`} onClick={() => setSection('mem0')}>Memory</button>
-          <button className={`seg-btn ${section === 'logs' ? 'active' : ''}`} onClick={() => setSection('logs')}>Logs</button>
         </div>
       </div>
 
@@ -350,9 +323,9 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                         </div>
                       </div>
 
-                      {/* Container Lifecycle */}
+                      {/* Session Lifecycle */}
                       <div style={{ marginBottom: 12 }}>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>Container Lifecycle</div>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>Session Lifecycle</div>
                         <div className="segmented">
                           <button className={`seg-btn ${gs.idleTimeoutMinutes === 0 ? 'active' : ''}`}
                             onClick={() => updateSetting({ idleTimeoutMinutes: 0, isTransient: false })}
@@ -366,9 +339,9 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                           >Transient</button>
                         </div>
                         <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 4 }}>
-                          {gs.idleTimeoutMinutes === 0 ? 'Container never auto-closes' :
-                           gs.isTransient ? 'Container closes after each response' :
-                           `Container closes after ${gs.idleTimeoutMinutes || 30} min idle`}
+                          {gs.idleTimeoutMinutes === 0 ? 'Session stays alive indefinitely' :
+                           gs.isTransient ? 'Fresh session for each turn (no memory between turns)' :
+                           `Session closes after ${gs.idleTimeoutMinutes || 30} min idle`}
                         </div>
                         {gs.idleTimeoutMinutes !== 0 && !gs.isTransient && (
                           <div style={{ marginTop: 6, display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -758,36 +731,6 @@ export function SettingsView({ groups }: { groups: Group[] }) {
       {section === 'mem0' && !mem0 && <div style={{ padding: 40, textAlign: 'center', color: 'var(--text3)' }}>Loading...</div>}
 
       {/* ── Logs ── */}
-      {section === 'logs' && (
-        <>
-          <div className="logs-toolbar">
-            <select value={folder} onChange={e => setFolder(e.target.value)}>
-              {groups.map(g => <option key={g.folder} value={g.folder}>{g.name}</option>)}
-            </select>
-          </div>
-          {/* Live terminal — always visible */}
-          <div style={{ margin: '0 12px 12px', borderRadius: '0.75rem', overflow: 'hidden', border: '1px solid rgba(108,60,225,0.2)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', background: 'rgba(108,60,225,0.08)' }}>
-              <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--accent)', letterSpacing: '0.05em', textTransform: 'uppercase' }}>
-                <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: '#22c55e', marginRight: 6, animation: 'pulse 1.5s infinite' }} />
-                Live Output
-              </span>
-              <span style={{ fontSize: 10, color: 'var(--text3)' }}>{(containerLogs[folder] || []).length} / 10 lines</span>
-            </div>
-            <div style={{ background: '#0d0d0d', padding: '8px 12px', fontFamily: 'monospace', fontSize: 11, lineHeight: 1.6, minHeight: 140, maxHeight: 400, overflowY: 'auto' }}>
-              {(containerLogs[folder] || []).length === 0
-                ? <span style={{ color: '#475569' }}>Waiting for logs...</span>
-                : (containerLogs[folder] || []).map((entry, i) => (
-                  <div key={i} style={{ color: entry.stream === 'stderr' ? '#a3e635' : '#e2e8f0', wordBreak: 'break-all' }}>
-                    <span style={{ color: '#475569', marginRight: 8 }}>{entry.ts}</span>
-                    {entry.line}
-                  </div>
-                ))
-              }
-            </div>
-          </div>
-        </>
-      )}
     </div>
   );
 }
