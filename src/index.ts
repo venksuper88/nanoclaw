@@ -200,18 +200,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
-  // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
-    const allowlistCfg = loadSenderAllowlist();
-    const hasTrigger = missedMessages.some(
-      (m) =>
-        TRIGGER_PATTERN.test(m.content.trim()) &&
-        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-    );
-    if (!hasTrigger) return true;
-  }
-
-  // Intercept session commands (/context, /compact, /new)
+  // Intercept session commands (/context, /compact, /new) BEFORE trigger check
+  // so owner can always run session commands regardless of requiresTrigger setting
   const cmdResult = await handleSessionCommand({
     missedMessages,
     isMainGroup,
@@ -239,7 +229,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             timestamp: new Date().toISOString(),
             is_from_me: true,
             is_bot_message: true,
-          }).catch(() => {});
+          }).catch((err) => logger.warn({ err }, 'storeMessage (session cmd) failed'));
         }
       },
       setTyping: async (typing) => { await channel?.setTyping?.(chatJid, typing); },
@@ -259,6 +249,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     },
   });
   if (cmdResult.handled) return cmdResult.success;
+
+  // For non-main groups, check if trigger is required and present
+  if (!isMainGroup && group.requiresTrigger !== false) {
+    const allowlistCfg = loadSenderAllowlist();
+    const hasTrigger = missedMessages.some(
+      (m) =>
+        TRIGGER_PATTERN.test(m.content.trim()) &&
+        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+    );
+    if (!hasTrigger) return true;
+  }
 
   const rawPrompt = formatMessages(missedMessages, TIMEZONE, group.folder);
 
