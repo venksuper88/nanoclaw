@@ -292,12 +292,10 @@ export function App() {
               <div className="agent-name">{g.name}</div>
               <div className="agent-status">
                 {processingFolders.has(g.folder) ? 'Processing...' : g.hasSession ? 'Active Now' : `${g.channel} · idle`}
-                {contextPercent[g.folder] != null && (
-                  <span style={{
-                    marginLeft: 6,
-                    color: contextPercent[g.folder] > 80 ? 'var(--error)' : contextPercent[g.folder] > 50 ? 'var(--orange)' : 'inherit',
-                  }}>· {contextPercent[g.folder]}%</span>
-                )}
+                <span style={{
+                  marginLeft: 6,
+                  color: contextPercent[g.folder] > 80 ? 'var(--error)' : contextPercent[g.folder] > 50 ? 'var(--orange)' : 'inherit',
+                }}>· {g.model === 'sonnet' ? 'S' : 'O'}{contextPercent[g.folder] != null ? ` ${contextPercent[g.folder]}%` : ''}</span>
               </div>
             </div>
             {(g.hasSession || processingFolders.has(g.folder)) && <div className="agent-dot" />}
