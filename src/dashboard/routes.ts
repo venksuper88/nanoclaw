@@ -191,6 +191,7 @@ export function createRouter(): Router {
           requiresTrigger: group.requiresTrigger ?? true,
           hasSession: !!sessions[group.folder],
           showInSidebar: group.showInSidebar !== false,
+          model: group.model || 'opus',
         };
       });
 
@@ -729,6 +730,7 @@ export function createRouter(): Router {
           showInSidebar: group.showInSidebar !== false,
           idleTimeoutMinutes: group.idleTimeoutMinutes ?? null,
           allowedSkills: group.allowedSkills || [],
+          model: group.model || 'opus',
           tokens,
         },
       });
@@ -760,6 +762,7 @@ export function createRouter(): Router {
         idleTimeoutMinutes,
         allowedSkills,
         mode,
+        model,
       } = req.body;
       const updated = { ...group };
       if (memoryMode !== undefined) updated.memoryMode = memoryMode;
@@ -773,6 +776,7 @@ export function createRouter(): Router {
       if (mode !== undefined && mode === 'tmux')
         updated.mode = mode;
       if (req.body.workDir !== undefined) updated.workDir = req.body.workDir || undefined;
+      if (model !== undefined && (model === 'opus' || model === 'sonnet')) updated.model = model;
 
       await setRegisteredGroup(jid, updated);
       res.json({

@@ -28,6 +28,7 @@ export interface RegisteredGroup {
   allowedSkills?: string[]; // Skill folders to load. Empty = all skills.
   mode?: string; // Kept for DB compat. Always 'tmux' now.
   workDir?: string; // Custom working directory (absolute path)
+  model?: 'opus' | 'sonnet'; // Claude model to use (default: opus)
 }
 
 export interface NewMessage {

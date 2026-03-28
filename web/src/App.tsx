@@ -22,6 +22,7 @@ export interface Group {
   requiresTrigger: boolean;
   hasSession: boolean;
   showInSidebar: boolean;
+  model: string;
 }
 
 export interface Status {
@@ -225,11 +226,12 @@ export function App() {
         <span className={`top-bar-badge ${connected ? 'live' : 'offline'}`}>
           {connected ? (selectedGroup && processingFolders.has(selectedGroup.folder) ? 'Thinking' : 'Active') : 'Offline'}
         </span>
-        {selectedGroup && contextPercent[selectedGroup.folder] != null && (
+        {selectedGroup && (
           <span className="top-bar-context" style={{
             color: contextPercent[selectedGroup.folder] > 80 ? 'var(--error)' : contextPercent[selectedGroup.folder] > 50 ? 'var(--orange)' : 'var(--text2)',
           }}>
-            {contextPercent[selectedGroup.folder]}%
+            {selectedGroup.model === 'sonnet' ? 'S' : 'O'}
+            {contextPercent[selectedGroup.folder] != null ? ` ${contextPercent[selectedGroup.folder]}%` : ''}
           </span>
         )}
         <div className="top-bar-spacer" />

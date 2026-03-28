@@ -286,6 +286,15 @@ async function createSchema(database: Client): Promise<void> {
     /* column already exists */
   }
 
+  // Add model column for per-group model selection
+  try {
+    await database.execute(
+      `ALTER TABLE registered_groups ADD COLUMN model TEXT DEFAULT 'opus'`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
   // Token usage tracking per group
   await database.execute(`
     CREATE TABLE IF NOT EXISTS token_usage (
@@ -940,8 +949,8 @@ export async function setRegisteredGroup(
     throw new Error(`Invalid group folder "${group.folder}" for JID ${jid}`);
   }
   await db.execute({
-    sql: `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main, is_transient, memory_mode, memory_scopes, memory_user_id, show_in_sidebar, idle_timeout_minutes, allowed_skills, mode, work_dir)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    sql: `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main, is_transient, memory_mode, memory_scopes, memory_user_id, show_in_sidebar, idle_timeout_minutes, allowed_skills, mode, work_dir, model)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       jid,
       group.name,
@@ -960,6 +969,7 @@ export async function setRegisteredGroup(
       JSON.stringify(group.allowedSkills || []),
       group.mode || 'tmux',
       group.workDir ?? null,
+      group.model || 'opus',
     ],
   });
 }
@@ -985,6 +995,7 @@ export async function getAllRegisteredGroups(): Promise<
     allowed_skills: string | null;
     mode: string | null;
     work_dir: string | null;
+    model: string | null;
   }>;
   const out: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
@@ -1012,6 +1023,7 @@ export async function getAllRegisteredGroups(): Promise<
       allowedSkills: row.allowed_skills ? JSON.parse(row.allowed_skills) : [],
       mode: row.mode || 'tmux',
       workDir: row.work_dir || undefined,
+      model: (row.model as 'opus' | 'sonnet') || 'opus',
     };
   }
   return out;

@@ -205,6 +205,7 @@ export NANOCLAW_CHAT_JID="${chatJid}"
 export NANOCLAW_GROUP_FOLDER="${group.folder}"
 export NANOCLAW_IS_MAIN="${group.isMain ? '1' : '0'}"
 export NANOCLAW_IPC_DIR="${ipcDir}"
+MODEL="${group.model === 'sonnet' ? 'sonnet' : 'opus'}"
 CLAUDE_BIN="${CLAUDE_BIN}"
 PROMPT_FILE="$1"
 SESSION_ARG="$2"
@@ -219,7 +220,7 @@ PROMPT=$(cat "$PROMPT_FILE")
 rm -f "$PROMPT_FILE"
 
 STREAM_LOG="\${DONE_FILE%.json}.stream"
-"$CLAUDE_BIN" -p "$PROMPT" $RESUME_FLAG --output-format stream-json --verbose --dangerously-skip-permissions 2>"$DONE_FILE.stderr" | tee "$STREAM_LOG"
+"$CLAUDE_BIN" -p "$PROMPT" $RESUME_FLAG --model "$MODEL" --output-format stream-json --verbose --dangerously-skip-permissions 2>"$DONE_FILE.stderr" | tee "$STREAM_LOG"
 
 EXIT_CODE=\${PIPESTATUS[0]}
 echo "{\\"type\\":\\"done\\",\\"exit_code\\":$EXIT_CODE}" > "$DONE_FILE"

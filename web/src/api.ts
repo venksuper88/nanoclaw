@@ -69,7 +69,7 @@ export const api = {
     request<ApiResponse<{ uptime: number; assistantName: string; groupCount: number; taskCount: number; activeTasks: number; sessionCount: number }>>('/api/status'),
 
   getGroups: () =>
-    request<ApiResponse<Array<{ jid: string; name: string; folder: string; channel: string; lastActivity: string; isMain: boolean; isTransient: boolean; requiresTrigger: boolean; hasSession: boolean; showInSidebar: boolean }>>>('/api/groups'),
+    request<ApiResponse<Array<{ jid: string; name: string; folder: string; channel: string; lastActivity: string; isMain: boolean; isTransient: boolean; requiresTrigger: boolean; hasSession: boolean; showInSidebar: boolean; model: string }>>>('/api/groups'),
 
   getMessages: (jid: string, limit = 50) =>
     request<ApiResponse<Array<{ id: string; sender: string; senderName: string; content: string; timestamp: string; isFromMe: boolean; isBotMessage: boolean }>>>(`/api/groups/${encodeURIComponent(jid)}/messages?limit=${limit}`),
@@ -153,9 +153,9 @@ export const api = {
     request<ApiResponse<{ percent: number; sizeKB: number }>>(`/api/groups/${encodeURIComponent(jid)}/context`),
 
   getGroupSettings: (jid: string) =>
-    request<ApiResponse<{ jid: string; name: string; folder: string; isMain: boolean; isTransient: boolean; memoryMode: string; memoryScopes: string[]; memoryUserId: string; showInSidebar: boolean; idleTimeoutMinutes: number | null; allowedSkills: string[]; tokens: Array<{ name: string; role: string; isOwner: boolean }> }>>(`/api/groups/${encodeURIComponent(jid)}/settings`),
+    request<ApiResponse<{ jid: string; name: string; folder: string; isMain: boolean; isTransient: boolean; memoryMode: string; memoryScopes: string[]; memoryUserId: string; showInSidebar: boolean; idleTimeoutMinutes: number | null; allowedSkills: string[]; model: string; tokens: Array<{ name: string; role: string; isOwner: boolean }> }>>(`/api/groups/${encodeURIComponent(jid)}/settings`),
 
-  updateGroupSettings: (jid: string, settings: { memoryMode?: string; memoryScopes?: string[]; memoryUserId?: string; isTransient?: boolean; showInSidebar?: boolean; idleTimeoutMinutes?: number | null; allowedSkills?: string[] }) =>
+  updateGroupSettings: (jid: string, settings: { memoryMode?: string; memoryScopes?: string[]; memoryUserId?: string; isTransient?: boolean; showInSidebar?: boolean; idleTimeoutMinutes?: number | null; allowedSkills?: string[]; model?: string }) =>
     request<ApiResponse<any>>(`/api/groups/${encodeURIComponent(jid)}/settings`, {
       method: 'PUT',
       body: JSON.stringify(settings),

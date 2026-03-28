@@ -228,7 +228,7 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                 if (!gs) loadSettings();
               };
 
-              const updateSetting = async (update: { memoryMode?: string; memoryScopes?: string[]; memoryUserId?: string; isTransient?: boolean; showInSidebar?: boolean; idleTimeoutMinutes?: number | null; allowedSkills?: string[] }) => {
+              const updateSetting = async (update: { memoryMode?: string; memoryScopes?: string[]; memoryUserId?: string; isTransient?: boolean; showInSidebar?: boolean; idleTimeoutMinutes?: number | null; allowedSkills?: string[]; model?: string }) => {
                 await api.updateGroupSettings(g.jid, update);
                 loadSettings();
               };
@@ -256,6 +256,18 @@ export function SettingsView({ groups }: { groups: Group[] }) {
 
                   {isExpanded && gs && (
                     <div onClick={e => e.stopPropagation()} style={{ padding: '12px 0 4px' }}>
+                      {/* Model */}
+                      <div style={{ marginBottom: 12 }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>Model</div>
+                        <div className="segmented">
+                          <button className={`seg-btn ${(gs.model || 'opus') === 'opus' ? 'active' : ''}`} onClick={() => updateSetting({ model: 'opus' })}>Opus</button>
+                          <button className={`seg-btn ${gs.model === 'sonnet' ? 'active' : ''}`} onClick={() => updateSetting({ model: 'sonnet' })}>Sonnet</button>
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 4 }}>
+                          {(gs.model || 'opus') === 'opus' ? 'Most capable — deep reasoning, complex tasks' : 'Fast and efficient — simpler tasks, lower cost'}
+                        </div>
+                      </div>
+
                       {/* Memory Mode */}
                       <div style={{ marginBottom: 12 }}>
                         <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>Memory Mode</div>
