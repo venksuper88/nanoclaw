@@ -60,9 +60,10 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [viewingMedia, setViewingMedia] = useState<{ url: string; filename: string; type: 'image' | 'video' | 'pdf' } | null>(null);
-  const [stagedFile, setStagedFile] = useState<File | null>(null);
+  const [stagedFiles, setStagedFiles] = useState<File[]>([]);
   const [containerLogs, setContainerLogs] = useState<string[]>([]);
   const [logsVisible, setLogsVisible] = useState(false);
+  const [copiedToast, setCopiedToast] = useState(false);
   const PAGE_SIZE = 50;
 
   useEffect(() => {
@@ -319,31 +320,41 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
 
   const send = async () => {
     const hasText = input.trim().length > 0;
-    const hasFile = !!stagedFile;
-    if ((!hasText && !hasFile) || !selectedJid || !selectedGroup || sending) return;
+    const hasFiles = stagedFiles.length > 0;
+    if ((!hasText && !hasFiles) || !selectedJid || !selectedGroup || sending) return;
     setShowCommands(false);
     const t = input.trim();
-    const file = stagedFile;
+    const files = [...stagedFiles];
     // Cancel any pending debounced draft save before clearing
     if (draftTimer.current) { clearTimeout(draftTimer.current); draftTimer.current = null; }
     setInput('');
-    setStagedFile(null);
+    setStagedFiles([]);
     if (inputRef.current) (inputRef.current as any).innerText = '';
     if (selectedJid) api.setDraft(selectedJid, '').catch(() => {});
 
     setSending(true);
 
-    // Upload file first if staged
-    if (file) {
+    // Upload files
+    const uploadedNames: string[] = [];
+    for (const file of files) {
       const fd = new FormData();
       fd.append('file', file);
-      try { await api.uploadFile(selectedGroup.folder, fd); } catch {}
+      try {
+        await api.uploadFile(selectedGroup.folder, fd);
+        uploadedNames.push(file.name);
+      } catch (err) {
+        addSystemMessage(`Upload failed (${file.name}): ${err instanceof Error ? err.message : 'Unknown error'}`);
+      }
     }
 
-    // Send message (with file reference if uploaded)
-    const msgText = file
-      ? (hasText ? `[File: ${file.name}]\n${t}` : `[File: ${file.name}]`)
+    // Build message with file tags for successfully uploaded files
+    const fileTags = uploadedNames.map(n => `[File: ${n}]`).join('\n');
+    const msgText = fileTags
+      ? (hasText ? `${fileTags}\n${t}` : fileTags)
       : t;
+
+    // Don't send empty message (all uploads failed, no text)
+    if (!msgText) { setSending(false); return; }
 
     setMessages(p => [...p, { id: `l-${Date.now()}`, senderName: 'You', content: msgText, timestamp: new Date().toISOString(), isFromMe: true, isBotMessage: false }]);
     try { await api.sendChat(selectedJid, msgText); } catch {}
@@ -351,22 +362,22 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
     (inputRef.current as any)?.focus();
   };
 
-  const stageFile = (f: File) => {
-    setStagedFile(f);
+  const stageFile = (newFiles: File[]) => {
+    setStagedFiles(prev => [...prev, ...newFiles]);
     (inputRef.current as any)?.focus();
   };
 
   const upload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    if (f) stageFile(f);
+    const files = e.target.files;
+    if (files?.length) stageFile(Array.from(files));
     e.target.value = '';
   };
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    const f = e.dataTransfer.files[0];
-    if (f) stageFile(f);
+    const files = e.dataTransfer.files;
+    if (files.length) stageFile(Array.from(files));
   };
 
   // Parse [File: name], [Document: name | path:...], [Photo: name | path:...] from message content
@@ -444,6 +455,15 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
                 </div>
               )}
               <div className="msg-bubble-wrap">
+                <button className="msg-copy-btn" onClick={(e) => {
+                  e.stopPropagation();
+                  navigator.clipboard.writeText(msg.content).then(() => {
+                    setCopiedToast(true);
+                    setTimeout(() => setCopiedToast(false), 1500);
+                  }).catch(() => {});
+                }} title="Copy message">
+                  <span className="mi" style={{ fontSize: 16 }}>content_copy</span>
+                </button>
                 {(() => {
                   const media = parseMedia(msg.content, selectedGroup?.folder);
                   if (media.type === 'image') {
@@ -467,17 +487,14 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
                   if (media.type === 'pdf') {
                     return (
                       <div className="message-bubble media-bubble" style={{ padding: 0 }}>
-                        <div className="msg-pdf-header" style={{ cursor: 'pointer' }} onClick={() => setViewingMedia({ url: media.url, filename: media.filename, type: 'pdf' })}>
+                        <a href={media.url} target="_blank" rel="noopener" className="msg-pdf-header" style={{ cursor: 'pointer', textDecoration: 'none', color: 'inherit' }}>
                           <span className="mi" style={{ fontSize: 22, color: 'var(--error)' }}>picture_as_pdf</span>
                           <div style={{ flex: 1 }}>
                             <div style={{ fontWeight: 600, fontSize: 13 }}>{media.filename}</div>
                             <div style={{ fontSize: 11, color: 'var(--text2)' }}>PDF Document &middot; Tap to open</div>
                           </div>
                           <span className="mi" style={{ fontSize: 20, color: 'var(--text3)' }}>open_in_new</span>
-                        </div>
-                        <div style={{ cursor: 'pointer', position: 'relative' }} onClick={() => setViewingMedia({ url: media.url, filename: media.filename, type: 'pdf' })}>
-                          <iframe src={media.url} className="msg-pdf-preview" title={media.filename} style={{ pointerEvents: 'none' }} />
-                        </div>
+                        </a>
                         {media.text && <div className="msg-media-caption" dangerouslySetInnerHTML={{ __html: renderMarkdown(media.text) }} />}
                         <span className="time" style={{ padding: '0 12px 6px', display: 'block' }}>{fmtTime(msg.timestamp)}</span>
                       </div>
@@ -518,6 +535,13 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
         <div ref={bottomRef} />
       </div>
 
+      {/* Copied toast */}
+      {copiedToast && (
+        <div style={{ position: 'absolute', bottom: 100, left: '50%', transform: 'translateX(-50%)', background: 'rgba(0,0,0,0.75)', color: 'white', padding: '8px 16px', borderRadius: 20, fontSize: 13, fontWeight: 600, zIndex: 100, pointerEvents: 'none' }}>
+          Copied to clipboard
+        </div>
+      )}
+
       {/* Scroll to bottom button */}
       {showScrollDown && (
         <button className="scroll-down-btn" onClick={scrollToBottom}>
@@ -538,18 +562,22 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
       )}
 
       {/* Staged file preview */}
-      {stagedFile && (
-        <div className="staged-file">
-          {stagedFile.type.startsWith('image/') ? (
-            <img src={URL.createObjectURL(stagedFile)} alt="" style={{ width: 32, height: 32, borderRadius: 6, objectFit: 'cover' }} />
-          ) : (
-            <span className="mi" style={{ fontSize: 16 }}>attach_file</span>
-          )}
-          <span className="staged-file-name">{stagedFile.name}</span>
-          <span className="staged-file-size">{stagedFile.size < 1024 ? `${stagedFile.size}B` : stagedFile.size < 1048576 ? `${(stagedFile.size/1024).toFixed(0)}KB` : `${(stagedFile.size/1048576).toFixed(1)}MB`}</span>
-          <button className="staged-file-remove" onClick={() => setStagedFile(null)}>
-            <span className="mi" style={{ fontSize: 16 }}>close</span>
-          </button>
+      {stagedFiles.length > 0 && (
+        <div className="staged-files">
+          {stagedFiles.map((f, i) => (
+            <div className="staged-file" key={`${f.name}-${i}`}>
+              {f.type.startsWith('image/') ? (
+                <img src={URL.createObjectURL(f)} alt="" style={{ width: 32, height: 32, borderRadius: 6, objectFit: 'cover' }} />
+              ) : (
+                <span className="mi" style={{ fontSize: 16 }}>attach_file</span>
+              )}
+              <span className="staged-file-name">{f.name}</span>
+              <span className="staged-file-size">{f.size < 1024 ? `${f.size}B` : f.size < 1048576 ? `${(f.size/1024).toFixed(0)}KB` : `${(f.size/1048576).toFixed(1)}MB`}</span>
+              <button className="staged-file-remove" onClick={() => setStagedFiles(prev => prev.filter((_, j) => j !== i))}>
+                <span className="mi" style={{ fontSize: 16 }}>close</span>
+              </button>
+            </div>
+          ))}
         </div>
       )}
 
@@ -557,7 +585,7 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
       <div className="chat-input-bar">
         <label className="attach-btn">
           <span className="mi">attach_file</span>
-          <input type="file" style={{ display: 'none' }} onChange={upload} />
+          <input type="file" style={{ display: 'none' }} onChange={upload} multiple />
         </label>
         <div
           ref={inputRef as any}
@@ -579,7 +607,7 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
           }}
           suppressContentEditableWarning
         />
-        <button type="button" className={`send-btn ${(input.trim() || stagedFile) ? 'ready' : 'idle'}`} onClick={send} disabled={sending || (!input.trim() && !stagedFile)}>
+        <button type="button" className={`send-btn ${(input.trim() || stagedFiles.length) ? 'ready' : 'idle'}`} onClick={send} disabled={sending || (!input.trim() && !stagedFiles.length)}>
           <span className="mi" style={{ fontSize: 20 }}>send</span>
         </button>
       </div>

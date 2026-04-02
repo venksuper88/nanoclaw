@@ -32,8 +32,23 @@ interface ScopeDef {
   created_at: string;
 }
 
+interface EmailRuleRow {
+  id: string;
+  name: string;
+  priority: number;
+  from_pattern: string;
+  subject_pattern: string;
+  body_pattern: string;
+  action: string;
+  target_group: string;
+  extract_prompt: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export function SettingsView({ groups }: { groups: Group[] }) {
-  const [section, setSection] = useState<'groups' | 'tokens' | 'mem0'>('groups');
+  const [section, setSection] = useState<'groups' | 'tokens' | 'mem0' | 'email'>('groups');
 
   const [mem0, setMem0] = useState<Mem0Stats | null>(null);
   const [isOwner, setIsOwner] = useState(false);
@@ -49,14 +64,23 @@ export function SettingsView({ groups }: { groups: Group[] }) {
   const [editingMemory, setEditingMemory] = useState<string | null>(null);
   const [memoryFilter, setMemoryFilter] = useState<'all' | 'private' | 'shared'>('all');
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
-  const [groupSettings, setGroupSettings] = useState<Record<string, { memoryMode: string; memoryScopes: string[]; memoryUserId: string; isTransient: boolean; showInSidebar: boolean; idleTimeoutMinutes: number | null; allowedSkills: string[]; tokens: Array<{ name: string; role: string; isOwner: boolean }> }>>({});
+  const [groupSettings, setGroupSettings] = useState<Record<string, { memoryMode: string; memoryScopes: string[]; memoryUserId: string; isTransient: boolean; showInSidebar: boolean; idleTimeoutMinutes: number | null; allowedSkills: string[]; allowedMcpServers: string[]; model: string; contextWindow: string; tokens: Array<{ name: string; role: string; isOwner: boolean }> }>>({});
   const [availableSkills, setAvailableSkills] = useState<string[]>([]);
+  const [availableMcpServers, setAvailableMcpServers] = useState<Array<{ name: string; type: string }>>([]);
 
   // Scope definitions
   const [scopes, setScopes] = useState<ScopeDef[]>([]);
   const [showScopeCreate, setShowScopeCreate] = useState(false);
   const [newScopeName, setNewScopeName] = useState('');
   const [newScopeDesc, setNewScopeDesc] = useState('');
+
+  // Email rules state
+  const [emailRules, setEmailRules] = useState<EmailRuleRow[]>([]);
+  const [emailLog, setEmailLog] = useState<Array<{ sender: string; subject: string; rule_name: string | null; action: string; target_group: string | null; processed_at: string }>>([]);
+  const [extractionStats, setExtractionStats] = useState<{ today: { calls: number; input_tokens: number; output_tokens: number }; week: { calls: number; input_tokens: number; output_tokens: number }; total: { calls: number; input_tokens: number; output_tokens: number }; byType: Record<string, number> } | null>(null);
+  const [showRuleCreate, setShowRuleCreate] = useState(false);
+  const [editingRule, setEditingRule] = useState<string | null>(null);
+  const [ruleForm, setRuleForm] = useState({ name: '', priority: 100, from_pattern: '', subject_pattern: '', body_pattern: '', action: 'forward' as string, target_group: '', extract_prompt: '', enabled: true });
 
   // Move-to-shared state
   const [movingMemory, setMovingMemory] = useState<string | null>(null);
@@ -73,7 +97,18 @@ export function SettingsView({ groups }: { groups: Group[] }) {
         setAvailableSkills(r.data.map((s: { name: string }) => s.name));
       }
     }).catch(() => {});
+    api.getMcpServers().then(r => {
+      if (r.ok) setAvailableMcpServers(r.data);
+    }).catch(() => {});
   }, []);
+
+  // Load email rules
+  useEffect(() => {
+    if (section !== 'email' || !isOwner) return;
+    api.getEmailRules().then(r => { if (r.ok) setEmailRules(r.data); }).catch(() => {});
+    api.getEmailLog().then(r => { if (r.ok) setEmailLog(r.data); }).catch(() => {});
+    api.getExtractionStats().then(r => { if (r.ok) setExtractionStats(r.data); }).catch(() => {});
+  }, [section, isOwner]);
 
   // Load tokens
   useEffect(() => {
@@ -175,6 +210,7 @@ export function SettingsView({ groups }: { groups: Group[] }) {
         <h1>Settings</h1>
         <div className="segmented">
           {isOwner && <button className={`seg-btn ${section === 'groups' ? 'active' : ''}`} onClick={() => setSection('groups')}>Groups</button>}
+          {isOwner && <button className={`seg-btn ${section === 'email' ? 'active' : ''}`} onClick={() => setSection('email')}>Email</button>}
           {isOwner && <button className={`seg-btn ${section === 'tokens' ? 'active' : ''}`} onClick={() => setSection('tokens')}>Access</button>}
           <button className={`seg-btn ${section === 'mem0' ? 'active' : ''}`} onClick={() => setSection('mem0')}>Memory</button>
         </div>
@@ -201,7 +237,7 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                 if (!gs) loadSettings();
               };
 
-              const updateSetting = async (update: { memoryMode?: string; memoryScopes?: string[]; memoryUserId?: string; isTransient?: boolean; showInSidebar?: boolean; idleTimeoutMinutes?: number | null; allowedSkills?: string[]; model?: string }) => {
+              const updateSetting = async (update: { memoryMode?: string; memoryScopes?: string[]; memoryUserId?: string; isTransient?: boolean; showInSidebar?: boolean; idleTimeoutMinutes?: number | null; allowedSkills?: string[]; allowedMcpServers?: string[]; model?: string; contextWindow?: string }) => {
                 await api.updateGroupSettings(g.jid, update);
                 loadSettings();
               };
@@ -238,6 +274,18 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                         </div>
                         <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 4 }}>
                           {(gs.model || 'opus') === 'opus' ? 'Most capable — deep reasoning, complex tasks' : 'Fast and efficient — simpler tasks, lower cost'}
+                        </div>
+                      </div>
+
+                      {/* Context Window */}
+                      <div style={{ marginBottom: 12 }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>Context Window</div>
+                        <div className="segmented">
+                          <button className={`seg-btn ${(gs.contextWindow || '200k') === '200k' ? 'active' : ''}`} onClick={() => updateSetting({ contextWindow: '200k' })}>200K</button>
+                          <button className={`seg-btn ${gs.contextWindow === '1m' ? 'active' : ''}`} onClick={() => updateSetting({ contextWindow: '1m' })}>1M</button>
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 4 }}>
+                          {gs.contextWindow === '1m' ? '1M tokens — fewer compactions, longer conversations. Requires /new to take effect.' : '200K tokens — standard context window'}
                         </div>
                       </div>
 
@@ -323,38 +371,42 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                         </div>
                       </div>
 
-                      {/* Session Lifecycle */}
+                      {/* MCP Servers */}
+                      {availableMcpServers.length > 0 && (
                       <div style={{ marginBottom: 12 }}>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>Session Lifecycle</div>
-                        <div className="segmented">
-                          <button className={`seg-btn ${gs.idleTimeoutMinutes === 0 ? 'active' : ''}`}
-                            onClick={() => updateSetting({ idleTimeoutMinutes: 0, isTransient: false })}
-                          >Always On</button>
-                          <button className={`seg-btn ${gs.idleTimeoutMinutes !== 0 && !gs.isTransient ? 'active' : ''}`}
-                            onClick={() => updateSetting({ idleTimeoutMinutes: null, isTransient: false })}
-                          >Cooldown</button>
-                          <button className={`seg-btn ${gs.isTransient ? 'active' : ''}`}
-                            onClick={() => updateSetting({ isTransient: true, idleTimeoutMinutes: null })}
-                            disabled={g.isMain}
-                          >Transient</button>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>MCP Servers</div>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          {availableMcpServers.map(srv => {
+                            const allowed = gs.allowedMcpServers || [];
+                            const isAllMode = allowed.includes('__all__');
+                            const isEnabled = isAllMode || allowed.includes(srv.name);
+                            return (
+                              <button key={srv.name}
+                                className={`btn btn-sm ${isEnabled ? 'btn-blue' : 'btn-outline'}`}
+                                title={`${srv.name} (${srv.type})`}
+                                onClick={() => {
+                                  if (isAllMode) {
+                                    // Switch from all to all-except-this
+                                    updateSetting({ allowedMcpServers: availableMcpServers.filter(s => s.name !== srv.name).map(s => s.name) });
+                                  } else if (isEnabled) {
+                                    const next = allowed.filter(s => s !== srv.name && s !== '__all__');
+                                    updateSetting({ allowedMcpServers: next });
+                                  } else {
+                                    const next = [...allowed.filter(s => s !== '__all__'), srv.name];
+                                    updateSetting({ allowedMcpServers: next.length >= availableMcpServers.length ? ['__all__'] : next });
+                                  }
+                                }}
+                              >{srv.name}</button>
+                            );
+                          })}
                         </div>
                         <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 4 }}>
-                          {gs.idleTimeoutMinutes === 0 ? 'Session stays alive indefinitely' :
-                           gs.isTransient ? 'Fresh session for each turn (no memory between turns)' :
-                           `Session closes after ${gs.idleTimeoutMinutes || 30} min idle`}
+                          {(gs.allowedMcpServers || []).length === 0 ? 'nanoclaw only — no global MCP servers' :
+                           (gs.allowedMcpServers || []).includes('__all__') ? 'All global MCP servers enabled' :
+                           `${(gs.allowedMcpServers || []).length} of ${availableMcpServers.length} enabled`}
                         </div>
-                        {gs.idleTimeoutMinutes !== 0 && !gs.isTransient && (
-                          <div style={{ marginTop: 6, display: 'flex', gap: 6, alignItems: 'center' }}>
-                            <span style={{ fontSize: 12, color: 'var(--text2)' }}>Timeout:</span>
-                            {[5, 15, 30, 60].map(m => (
-                              <button key={m}
-                                className={`btn btn-sm ${(gs.idleTimeoutMinutes || 30) === m ? 'btn-blue' : 'btn-outline'}`}
-                                onClick={() => updateSetting({ idleTimeoutMinutes: m })}
-                              >{m}m</button>
-                            ))}
-                          </div>
-                        )}
                       </div>
+                      )}
 
                       {/* Skills */}
                       <div style={{ marginBottom: 12 }}>
@@ -409,6 +461,218 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                 </div>
               );
             })}
+          </div>
+        </>
+      )}
+
+      {/* ── Email Rules ── */}
+      {section === 'email' && isOwner && (
+        <>
+          {/* Extraction Stats */}
+          {extractionStats && extractionStats.total.calls > 0 && (
+            <div className="card-grid">
+              <div className="card stat-card">
+                <div className="value">{extractionStats.today.calls}</div>
+                <div className="label">Today</div>
+              </div>
+              <div className="card stat-card">
+                <div className="value">{extractionStats.week.calls}</div>
+                <div className="label">This Week</div>
+              </div>
+              <div className="card stat-card">
+                <div className="value">{extractionStats.total.calls}</div>
+                <div className="label">Total Calls</div>
+              </div>
+              <div className="card stat-card">
+                <div className="value">{((extractionStats.total.input_tokens + extractionStats.total.output_tokens) / 1000).toFixed(1)}K</div>
+                <div className="label">Tokens Used</div>
+              </div>
+            </div>
+          )}
+          {extractionStats && extractionStats.total.calls > 0 && Object.keys(extractionStats.byType).length > 0 && (
+            <div style={{ padding: '0 16px 12px', display: 'flex', gap: 6 }}>
+              {Object.entries(extractionStats.byType).map(([type, count]) => (
+                <span key={type} className={`badge ${type === 'email' ? 'badge-blue' : type === 'image' ? 'badge-green' : 'badge-orange'}`}>
+                  {type}: {count}
+                </span>
+              ))}
+            </div>
+          )}
+
+          <div style={{ padding: '0 16px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div className="section-label" style={{ padding: 0 }}>Email Routing Rules</div>
+            <button className="btn btn-sm btn-blue" onClick={() => {
+              setRuleForm({ name: '', priority: (emailRules.length + 1) * 10, from_pattern: '', subject_pattern: '', body_pattern: '', action: 'forward', target_group: '', extract_prompt: '', enabled: true });
+              setShowRuleCreate(!showRuleCreate);
+              setEditingRule(null);
+            }}>
+              {showRuleCreate && !editingRule ? 'Cancel' : '+ New Rule'}
+            </button>
+          </div>
+
+          <div style={{ padding: '0 16px 12px', fontSize: 12, color: 'var(--text2)' }}>
+            Rules are checked in priority order (lowest first). First match wins. Unmatched emails go to the main group.
+          </div>
+
+          {/* Create / Edit form */}
+          {(showRuleCreate || editingRule) && (
+            <div style={{ margin: '0 16px 12px', padding: 14, background: 'var(--surface)', borderRadius: 'var(--r)' }}>
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Name</label>
+                <input value={ruleForm.name} onChange={e => setRuleForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. AppLovin reports" style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '0.5px solid var(--separator)', background: 'var(--input-bg)', color: 'var(--text)', fontSize: 14 }} />
+              </div>
+              <div style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <label style={{ fontSize: 12, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>From Pattern</label>
+                  <input value={ruleForm.from_pattern} onChange={e => setRuleForm(f => ({ ...f, from_pattern: e.target.value }))} placeholder="*@applovin.com" style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '0.5px solid var(--separator)', background: 'var(--input-bg)', color: 'var(--text)', fontSize: 13 }} />
+                </div>
+                <div style={{ width: 70 }}>
+                  <label style={{ fontSize: 12, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Priority</label>
+                  <input type="number" value={ruleForm.priority} onChange={e => setRuleForm(f => ({ ...f, priority: parseInt(e.target.value) || 0 }))} style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '0.5px solid var(--separator)', background: 'var(--input-bg)', color: 'var(--text)', fontSize: 13 }} />
+                </div>
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Subject Pattern</label>
+                <input value={ruleForm.subject_pattern} onChange={e => setRuleForm(f => ({ ...f, subject_pattern: e.target.value }))} placeholder="*revenue*" style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '0.5px solid var(--separator)', background: 'var(--input-bg)', color: 'var(--text)', fontSize: 13 }} />
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Body Contains (keyword)</label>
+                <input value={ruleForm.body_pattern} onChange={e => setRuleForm(f => ({ ...f, body_pattern: e.target.value }))} placeholder="optional keyword in body" style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '0.5px solid var(--separator)', background: 'var(--input-bg)', color: 'var(--text)', fontSize: 13 }} />
+              </div>
+              {ruleForm.action === 'forward' && (
+                <div style={{ marginBottom: 10 }}>
+                  <label style={{ fontSize: 12, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Extract Prompt (optional — guides Gemini summarization)</label>
+                  <input value={ruleForm.extract_prompt} onChange={e => setRuleForm(f => ({ ...f, extract_prompt: e.target.value }))} placeholder="e.g. Extract: merchant, amount, currency, date, invoice number" style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '0.5px solid var(--separator)', background: 'var(--input-bg)', color: 'var(--text)', fontSize: 13 }} />
+                  <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 3 }}>Empty = default summarization. Set a prompt to guide what Gemini extracts.</div>
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <label style={{ fontSize: 12, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Action</label>
+                  <div className="segmented">
+                    <button className={`seg-btn ${ruleForm.action === 'forward' ? 'active' : ''}`} onClick={() => setRuleForm(f => ({ ...f, action: 'forward' }))}>Forward</button>
+                    <button className={`seg-btn ${ruleForm.action === 'archive' ? 'active' : ''}`} onClick={() => setRuleForm(f => ({ ...f, action: 'archive' }))}>Archive</button>
+                    <button className={`seg-btn ${ruleForm.action === 'discard' ? 'active' : ''}`} onClick={() => setRuleForm(f => ({ ...f, action: 'discard' }))}>Discard</button>
+                  </div>
+                </div>
+              </div>
+              {ruleForm.action === 'forward' && (
+                <div style={{ marginBottom: 10 }}>
+                  <label style={{ fontSize: 12, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Target Group</label>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {groups.map(g => (
+                      <button key={g.folder} className={`btn btn-sm ${ruleForm.target_group === g.folder ? 'btn-blue' : 'btn-outline'}`} onClick={() => setRuleForm(f => ({ ...f, target_group: g.folder }))}>
+                        {g.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="btn btn-blue" disabled={!ruleForm.name.trim()} onClick={async () => {
+                  if (editingRule) {
+                    await api.updateEmailRule(editingRule, ruleForm);
+                  } else {
+                    await api.createEmailRule(ruleForm);
+                  }
+                  setShowRuleCreate(false);
+                  setEditingRule(null);
+                  api.getEmailRules().then(r => { if (r.ok) setEmailRules(r.data); });
+                }}>
+                  {editingRule ? 'Save Changes' : 'Create Rule'}
+                </button>
+                {editingRule && <button className="btn btn-outline" onClick={() => { setEditingRule(null); setShowRuleCreate(false); }}>Cancel</button>}
+              </div>
+            </div>
+          )}
+
+          {/* Rules list */}
+          <div className="list-group">
+            {emailRules.map(rule => (
+              <div key={rule.id} className="list-item" style={{ cursor: 'default', opacity: rule.enabled ? 1 : 0.5 }}>
+                <div style={{ width: 32, height: 32, borderRadius: 10, background: rule.action === 'forward' ? 'var(--purple)' : rule.action === 'archive' ? 'var(--text3)' : '#e74c3c', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <span className="mi" style={{ fontSize: 16, color: 'white' }}>
+                    {rule.action === 'forward' ? 'forward_to_inbox' : rule.action === 'archive' ? 'archive' : 'delete'}
+                  </span>
+                </div>
+                <div className="list-content">
+                  <div className="list-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {rule.name}
+                    <span className="badge" style={{ fontSize: 9, background: 'var(--bg)' }}>#{rule.priority}</span>
+                  </div>
+                  <div className="list-subtitle">
+                    {rule.from_pattern && `from: ${rule.from_pattern}`}
+                    {rule.from_pattern && rule.subject_pattern && ' · '}
+                    {rule.subject_pattern && `subj: ${rule.subject_pattern}`}
+                    {rule.body_pattern && ` · body: "${rule.body_pattern}"`}
+                    {!rule.from_pattern && !rule.subject_pattern && !rule.body_pattern && 'matches all emails'}
+                    {rule.action === 'forward' && ` → ${groups.find(g => g.folder === rule.target_group)?.name || rule.target_group}`}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                  <button className={`btn btn-sm ${rule.enabled ? 'btn-outline' : 'btn-blue'}`} onClick={async () => {
+                    await api.updateEmailRule(rule.id, { enabled: !rule.enabled });
+                    api.getEmailRules().then(r => { if (r.ok) setEmailRules(r.data); });
+                  }}>
+                    {rule.enabled ? 'Disable' : 'Enable'}
+                  </button>
+                  <button className="btn btn-sm btn-outline" onClick={() => {
+                    setRuleForm({ name: rule.name, priority: rule.priority, from_pattern: rule.from_pattern, subject_pattern: rule.subject_pattern, body_pattern: rule.body_pattern, action: rule.action, target_group: rule.target_group, extract_prompt: rule.extract_prompt || '', enabled: rule.enabled });
+                    setEditingRule(rule.id);
+                    setShowRuleCreate(false);
+                  }}>
+                    Edit
+                  </button>
+                  <button className="btn btn-sm btn-red" onClick={async () => {
+                    if (!confirm(`Delete rule "${rule.name}"?`)) return;
+                    await api.deleteEmailRule(rule.id);
+                    api.getEmailRules().then(r => { if (r.ok) setEmailRules(r.data); });
+                  }}>
+                    <span className="mi" style={{ fontSize: 14 }}>delete</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+            {emailRules.length === 0 && (
+              <div style={{ padding: 20, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>
+                No email rules yet. Unmatched emails go to the main group (PO).
+              </div>
+            )}
+          </div>
+
+          {/* Activity Log */}
+          <div style={{ padding: '12px 16px 8px' }}>
+            <div className="section-label" style={{ padding: 0 }}>Recent Activity</div>
+          </div>
+          <div className="list-group">
+            {emailLog.map((entry, i) => (
+              <div key={i} className="list-item" style={{ cursor: 'default', padding: '8px 16px' }}>
+                <div style={{ width: 24, height: 24, borderRadius: 8, background: entry.action === 'forward' ? 'var(--purple)' : entry.action === 'fallback' ? 'var(--text3)' : entry.action === 'archive' ? '#f39c12' : '#e74c3c', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <span className="mi" style={{ fontSize: 14, color: 'white' }}>
+                    {entry.action === 'forward' ? 'forward_to_inbox' : entry.action === 'fallback' ? 'inbox' : entry.action === 'archive' ? 'archive' : 'delete'}
+                  </span>
+                </div>
+                <div className="list-content">
+                  <div className="list-title" style={{ fontSize: 12 }}>
+                    {entry.subject.length > 50 ? entry.subject.slice(0, 47) + '...' : entry.subject}
+                  </div>
+                  <div className="list-subtitle" style={{ fontSize: 11 }}>
+                    {entry.sender}
+                    {entry.rule_name ? ` · rule: ${entry.rule_name}` : ' · no match'}
+                    {entry.target_group ? ` → ${groups.find(g => g.folder === entry.target_group)?.name || entry.target_group}` : ''}
+                    {' · '}{fmtDate(entry.processed_at)}
+                  </div>
+                </div>
+                <span className={`badge ${entry.action === 'forward' ? 'badge-green' : entry.action === 'fallback' ? 'badge-blue' : entry.action === 'archive' ? 'badge-orange' : 'badge-red'}`} style={{ fontSize: 9 }}>
+                  {entry.action}
+                </span>
+              </div>
+            ))}
+            {emailLog.length === 0 && (
+              <div style={{ padding: 20, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>
+                No emails processed yet.
+              </div>
+            )}
           </div>
         </>
       )}

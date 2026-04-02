@@ -55,7 +55,9 @@ async function requestFormData<T>(path: string, formData: FormData): Promise<T> 
     body: formData,
   });
   if (res.status === 401) throw new Error('Unauthorized');
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) throw new Error((data as any).error || `Upload failed (${res.status})`);
+  return data;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -127,25 +129,6 @@ export const api = {
   deleteTodo: (id: string) =>
     request<ApiResponse<null>>(`/api/todos/${id}`, { method: 'DELETE' }),
 
-  // Reminders
-  getReminders: () =>
-    request<ApiResponse<Array<{ id: string; user_id: string; title: string; data: string | null; remind_at: string; recurrence: string | null; status: string; snoozed_until: string | null; created_by: string; created_at: string }>>>('/api/reminders'),
-
-  createReminder: (reminder: { title: string; data?: string; remind_at: string; recurrence?: string }) =>
-    request<ApiResponse<any>>('/api/reminders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reminder) }),
-
-  updateReminder: (id: string, updates: Record<string, any>) =>
-    request<ApiResponse<any>>(`/api/reminders/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) }),
-
-  snoozeReminder: (id: string, snooze_until: string) =>
-    request<ApiResponse<any>>(`/api/reminders/${id}/snooze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ snooze_until }) }),
-
-  dismissReminder: (id: string) =>
-    request<ApiResponse<any>>(`/api/reminders/${id}/dismiss`, { method: 'POST' }),
-
-  deleteReminder: (id: string) =>
-    request<ApiResponse<null>>(`/api/reminders/${id}`, { method: 'DELETE' }),
-
   getLogs: (folder: string) =>
     request<ApiResponse<Array<{ name: string; content: string }>>>(`/api/logs/${folder}`),
 
@@ -155,7 +138,7 @@ export const api = {
   getGroupSettings: (jid: string) =>
     request<ApiResponse<{ jid: string; name: string; folder: string; isMain: boolean; isTransient: boolean; memoryMode: string; memoryScopes: string[]; memoryUserId: string; showInSidebar: boolean; idleTimeoutMinutes: number | null; allowedSkills: string[]; model: string; tokens: Array<{ name: string; role: string; isOwner: boolean }> }>>(`/api/groups/${encodeURIComponent(jid)}/settings`),
 
-  updateGroupSettings: (jid: string, settings: { memoryMode?: string; memoryScopes?: string[]; memoryUserId?: string; isTransient?: boolean; showInSidebar?: boolean; idleTimeoutMinutes?: number | null; allowedSkills?: string[]; model?: string }) =>
+  updateGroupSettings: (jid: string, settings: { memoryMode?: string; memoryScopes?: string[]; memoryUserId?: string; isTransient?: boolean; showInSidebar?: boolean; idleTimeoutMinutes?: number | null; allowedSkills?: string[]; allowedMcpServers?: string[]; model?: string }) =>
     request<ApiResponse<any>>(`/api/groups/${encodeURIComponent(jid)}/settings`, {
       method: 'PUT',
       body: JSON.stringify(settings),
@@ -203,16 +186,30 @@ export const api = {
   getSkills: () =>
     request<ApiResponse<Array<{ name: string; description: string; type: string; folder: string }>>>('/api/skills'),
 
-  getTokenUsage: (days?: number, folder?: string) => {
+  getMcpServers: () =>
+    request<ApiResponse<Array<{ name: string; type: string }>>>('/api/mcp-servers'),
+
+  getTokenUsage: (opts?: { days?: number; folder?: string; since?: string; until?: string }) => {
     const params = new URLSearchParams();
-    if (days) params.set('days', String(days));
-    if (folder) params.set('folder', folder);
+    if (opts?.days) params.set('days', String(opts.days));
+    if (opts?.folder) params.set('folder', opts.folder);
+    if (opts?.since) params.set('since', opts.since);
+    if (opts?.until) params.set('until', opts.until);
     const qs = params.toString();
     return request<ApiResponse<Array<{ group_folder: string; total_input: number; total_cache_creation: number; total_cache_read: number; total_output: number; total_tokens: number; turn_count: number }>>>(`/api/token-usage${qs ? `?${qs}` : ''}`);
   },
 
+  getAlerts: () =>
+    request<ApiResponse<Array<{ id: number; group_folder: string; group_name: string; type: string; message: string; duration_ms: number | null; num_turns: number | null; cost_usd: number | null; context_percent: number | null; created_at: string; dismissed: boolean }>>>('/api/alerts'),
+
+  dismissAlert: (id: number) =>
+    request<ApiResponse<null>>(`/api/alerts/${id}/dismiss`, { method: 'POST' }),
+
   getAnalytics: () =>
-    request<ApiResponse<{ groups: Array<{ jid: string; name: string; folder: string; channel: string; totalMessages: number; userMessages: number; botMessages: number; hasSession: boolean; lastActivity: string }>; totalGroups: number; totalTasks: number; activeTasks: number; totalSessions: number }>>('/api/analytics'),
+    request<ApiResponse<{ groups: Array<{ jid: string; name: string; folder: string; channel: string; totalMessages: number; userMessages: number; botMessages: number; hasSession: boolean; lastActivity: string; transcriptSize: number; currentTranscriptSize: number; contextPercent: number; attachmentSize: number }>; totalGroups: number; totalTasks: number; activeTasks: number; totalSessions: number }>>('/api/analytics'),
+
+  getClaudeUsage: () =>
+    request<ApiResponse<{ session: { percent: number; resetIn: string | null }; weeklyAll: { percent: number; resets: string | null }; weeklySonnet: { percent: number; resets: string | null }; scrapedAt: string } | null>>('/api/claude-usage'),
 
   // Memory scope definitions
   getScopes: () =>
@@ -240,4 +237,29 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ text }),
     }),
+
+  // Email Rules
+  getEmailRules: () =>
+    request<ApiResponse<Array<{ id: string; name: string; priority: number; from_pattern: string; subject_pattern: string; body_pattern: string; action: string; target_group: string; enabled: boolean; created_at: string; updated_at: string }>>>('/api/email-rules'),
+
+  createEmailRule: (rule: { name: string; priority?: number; from_pattern?: string; subject_pattern?: string; body_pattern?: string; action?: string; target_group?: string; enabled?: boolean }) =>
+    request<ApiResponse<{ id: string }>>('/api/email-rules', {
+      method: 'POST',
+      body: JSON.stringify(rule),
+    }),
+
+  updateEmailRule: (id: string, updates: Record<string, any>) =>
+    request<ApiResponse<any>>(`/api/email-rules/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    }),
+
+  deleteEmailRule: (id: string) =>
+    request<ApiResponse<null>>(`/api/email-rules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  getEmailLog: (limit = 50) =>
+    request<ApiResponse<Array<{ sender: string; subject: string; rule_name: string | null; action: string; target_group: string | null; processed_at: string }>>>(`/api/email-log?limit=${limit}`),
+
+  getExtractionStats: () =>
+    request<ApiResponse<{ today: { calls: number; input_tokens: number; output_tokens: number }; week: { calls: number; input_tokens: number; output_tokens: number }; total: { calls: number; input_tokens: number; output_tokens: number }; byType: Record<string, number> }>>('/api/extraction-stats'),
 };

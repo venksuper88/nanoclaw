@@ -9,6 +9,13 @@ export interface AgentOutput {
     cache_creation_input_tokens: number;
     cache_read_input_tokens: number;
     output_tokens: number;
+    contextWindow?: number;
+  };
+  performance?: {
+    durationMs: number;
+    durationApiMs: number;
+    numTurns: number;
+    costUsd: number;
   };
 }
 
@@ -29,6 +36,25 @@ export interface RegisteredGroup {
   mode?: string; // Kept for DB compat. Always 'tmux' now.
   workDir?: string; // Custom working directory (absolute path)
   model?: 'opus' | 'sonnet'; // Claude model to use (default: opus)
+  contextWindow?: '200k' | '1m'; // Context window size (default: 200k)
+  allowedMcpServers?: string[]; // MCP server names to load from ~/.claude.json. Empty = none (only nanoclaw). ['__all__'] = all.
+  gmailFilter?: { subjectContains?: string[]; fromContains?: string[] }; // Route matching emails here instead of main group
+}
+
+/** Check if a group's memoryUserId (possibly comma-separated) includes this userId */
+export function groupHasUser(memoryUserId: string | undefined, userId: string): boolean {
+  const ids = (memoryUserId || 'venky').split(',').map((s) => s.trim());
+  return ids.includes(userId);
+}
+
+/** Get all user IDs from a group's memoryUserId (possibly comma-separated) */
+export function getGroupUserIds(memoryUserId: string | undefined): string[] {
+  return (memoryUserId || 'venky').split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/** Get the primary (first) user ID from a group's memoryUserId */
+export function getPrimaryUserId(memoryUserId: string | undefined): string {
+  return (memoryUserId || 'venky').split(',')[0].trim();
 }
 
 export interface NewMessage {
@@ -84,17 +110,21 @@ export interface Todo {
   updated_at: string;
 }
 
-export interface Reminder {
+// --- Email Rules ---
+
+export interface EmailRule {
   id: string;
-  user_id: string;
-  title: string;
-  data: string | null;
-  remind_at: string;
-  recurrence: string | null;
-  status: 'active' | 'fired' | 'snoozed' | 'dismissed';
-  snoozed_until: string | null;
-  created_by: string;
+  name: string;
+  priority: number;
+  from_pattern: string;
+  subject_pattern: string;
+  body_pattern: string;
+  action: 'forward' | 'archive' | 'discard';
+  target_group: string; // group folder name (for 'forward' action)
+  extract_prompt: string; // optional Gemini extraction prompt (empty = default summarization)
+  enabled: boolean;
   created_at: string;
+  updated_at: string;
 }
 
 // --- Channel abstraction ---

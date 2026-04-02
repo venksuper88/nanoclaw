@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import multer from 'multer';
 import Database from 'better-sqlite3';
@@ -32,30 +33,75 @@ import {
   getAllTodos,
   updateTodo,
   deleteTodo,
-  createReminder,
-  getReminderById,
-  getAllReminders,
-  updateReminder,
-  deleteReminder,
   getAllScopeDefs,
   createScopeDef,
   deleteScopeDef,
   getDraft,
   setDraft,
   getRouterState,
+  setRouterState,
   getTokenUsageSummary,
 } from '../db.js';
+import { getTenjinSnapshot, fetchAndStoreTenjinSnapshot, getAllTenjinSnapshots } from '../tenjin-snapshot.js';
 import { ASSISTANT_NAME, GROUPS_DIR } from '../config.js';
 import { dashboardEvents, contextCache } from './events.js';
 import {
   resolveGroupFolderPath,
   resolveGroupIpcPath,
 } from '../group-folder.js';
-import { formatMessages } from '../router.js';
+import { formatMessages, compressImageForAgent } from '../router.js';
 import { logger } from '../logger.js';
 import { randomUUID } from 'crypto';
 import { savePushSubscription, deletePushSubscription } from '../db.js';
 import { VAPID_PUBLIC_KEY } from '../config.js';
+import { getTranscriptSize, getSessionTranscriptSize } from '../tmux-runner.js';
+import { getGroupUserIds } from '../types.js';
+
+/**
+ * Compute next due date for a recurring todo.
+ * Presets: daily, weekday, weekly, monthly, yearly.
+ * Monthly handles short months by clamping to last day of month.
+ */
+function computeNextDueDate(fromIso: string, recurrence: string): string | null {
+  const from = new Date(fromIso);
+  if (isNaN(from.getTime())) return null;
+
+  switch (recurrence) {
+    case 'daily': {
+      from.setDate(from.getDate() + 1);
+      return from.toISOString();
+    }
+    case 'weekday': {
+      do {
+        from.setDate(from.getDate() + 1);
+      } while (from.getDay() === 0 || from.getDay() === 6);
+      return from.toISOString();
+    }
+    case 'weekly': {
+      from.setDate(from.getDate() + 7);
+      return from.toISOString();
+    }
+    case 'monthly': {
+      const origDay = from.getDate();
+      from.setMonth(from.getMonth() + 1);
+      // Clamp to last day if month is shorter (e.g. Jan 31 -> Feb 28)
+      if (from.getDate() < origDay) {
+        from.setDate(0); // go to last day of previous month
+      }
+      return from.toISOString();
+    }
+    case 'yearly': {
+      const origDay = from.getDate();
+      from.setFullYear(from.getFullYear() + 1);
+      if (from.getDate() < origDay) {
+        from.setDate(0);
+      }
+      return from.toISOString();
+    }
+    default:
+      return null;
+  }
+}
 
 // Multer storage: save uploads to the target group's attachments folder
 const upload = multer({
@@ -192,6 +238,7 @@ export function createRouter(): Router {
           hasSession: !!sessions[group.folder],
           showInSidebar: group.showInSidebar !== false,
           model: group.model || 'opus',
+          contextWindow: group.contextWindow || '200k',
         };
       });
 
@@ -294,17 +341,37 @@ export function createRouter(): Router {
   // ── File upload ──
   router.post(
     '/api/groups/:folder/upload',
-    upload.single('file'),
-    (req: Request, res: Response) => {
+    (req: Request, res: Response, next) => {
+      upload.single('file')(req, res, (err) => {
+        if (err) {
+          logger.error({ err, folder: req.params.folder }, 'File upload multer error');
+          res.status(400).json({ ok: false, error: `Upload failed: ${err.message}` });
+          return;
+        }
+        next();
+      });
+    },
+    async (req: Request, res: Response) => {
       if (!req.file) {
         res.status(400).json({ ok: false, error: 'No file uploaded' });
         return;
       }
 
-      const containerPath = `/workspace/group/attachments/${req.file.originalname}`;
+      // Verify file was written to disk
+      if (!fs.existsSync(req.file.path)) {
+        logger.error({ path: req.file.path }, 'Uploaded file not found on disk after multer');
+        res.status(500).json({ ok: false, error: 'File write failed' });
+        return;
+      }
+
       logger.info(
-        { folder: req.params.folder as string, file: req.file.originalname },
+        { folder: req.params.folder as string, file: req.file.originalname, size: req.file.size, path: req.file.path },
         'File uploaded via dashboard',
+      );
+
+      // Pre-generate agent thumbnail for images (non-blocking)
+      compressImageForAgent(req.file.path).catch((err) =>
+        logger.warn({ err, file: req.file!.originalname }, 'Thumbnail pre-generation failed'),
       );
 
       res.json({
@@ -312,7 +379,7 @@ export function createRouter(): Router {
         data: {
           filename: req.file.originalname,
           size: req.file.size,
-          path: containerPath,
+          path: req.file.path,
         },
       });
     },
@@ -404,7 +471,7 @@ export function createRouter(): Router {
     const userIds = new Set(
       Object.entries(groups)
         .filter(([jid]) => user.isOwner || canAccessGroup(user, jid))
-        .map(([, g]) => g.memoryUserId || 'venky'),
+        .flatMap(([, g]) => getGroupUserIds(g.memoryUserId)),
     );
     const filtered = todos.filter((t) => userIds.has(t.user_id));
     res.json({ ok: true, data: filtered });
@@ -427,6 +494,25 @@ export function createRouter(): Router {
   router.patch('/api/todos/:id', async (req: Request, res: Response) => {
     const todo = await getTodoById(req.params.id as string);
     if (!todo) { res.status(404).json({ ok: false, error: 'Not found' }); return; }
+
+    // Handle recurring todo completion — reset with next due date instead of marking done
+    if (req.body.status === 'done' && todo.recurrence) {
+      const nextDue = computeNextDueDate(todo.due_date || new Date().toISOString(), todo.recurrence);
+      if (nextDue) {
+        const nextRemind = todo.remind_at
+          ? computeNextDueDate(todo.remind_at, todo.recurrence)
+          : null;
+        await updateTodo(req.params.id as string, {
+          due_date: nextDue,
+          remind_at: nextRemind,
+          reminder_fired_at: null,
+        } as any);
+        const updated = await getTodoById(req.params.id as string);
+        res.json({ ok: true, data: updated });
+        return;
+      }
+    }
+
     await updateTodo(req.params.id as string, req.body);
     const updated = await getTodoById(req.params.id as string);
     res.json({ ok: true, data: updated });
@@ -436,64 +522,6 @@ export function createRouter(): Router {
     const todo = await getTodoById(req.params.id as string);
     if (!todo) { res.status(404).json({ ok: false, error: 'Not found' }); return; }
     await deleteTodo(req.params.id as string);
-    res.json({ ok: true });
-  });
-
-  // ── Reminders ──
-  router.get('/api/reminders', async (req: Request, res: Response) => {
-    const user = getUser(req);
-    const reminders = await getAllReminders();
-    const groups = await getAllRegisteredGroups();
-    const userIds = new Set(
-      Object.entries(groups)
-        .filter(([jid]) => user.isOwner || canAccessGroup(user, jid))
-        .map(([, g]) => g.memoryUserId || 'venky'),
-    );
-    const filtered = reminders.filter((r) => userIds.has(r.user_id));
-    res.json({ ok: true, data: filtered });
-  });
-
-  router.post('/api/reminders', async (req: Request, res: Response) => {
-    const { title, data, remind_at, recurrence, user_id } = req.body;
-    if (!title || !remind_at) { res.status(400).json({ ok: false, error: 'title and remind_at required' }); return; }
-    const id = `rem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    await createReminder({
-      id, user_id: user_id || 'venky', title, data: data || null, remind_at,
-      recurrence: recurrence || null, status: 'active', snoozed_until: null,
-      created_by: 'dashboard', created_at: new Date().toISOString(),
-    });
-    const reminder = await getReminderById(id);
-    res.json({ ok: true, data: reminder });
-  });
-
-  router.patch('/api/reminders/:id', async (req: Request, res: Response) => {
-    const reminder = await getReminderById(req.params.id as string);
-    if (!reminder) { res.status(404).json({ ok: false, error: 'Not found' }); return; }
-    await updateReminder(req.params.id as string, req.body);
-    const updated = await getReminderById(req.params.id as string);
-    res.json({ ok: true, data: updated });
-  });
-
-  router.post('/api/reminders/:id/snooze', async (req: Request, res: Response) => {
-    const reminder = await getReminderById(req.params.id as string);
-    if (!reminder) { res.status(404).json({ ok: false, error: 'Not found' }); return; }
-    const { snooze_until } = req.body;
-    if (!snooze_until) { res.status(400).json({ ok: false, error: 'snooze_until required' }); return; }
-    await updateReminder(req.params.id as string, { status: 'snoozed', snoozed_until: snooze_until });
-    res.json({ ok: true });
-  });
-
-  router.post('/api/reminders/:id/dismiss', async (req: Request, res: Response) => {
-    const reminder = await getReminderById(req.params.id as string);
-    if (!reminder) { res.status(404).json({ ok: false, error: 'Not found' }); return; }
-    await updateReminder(req.params.id as string, { status: 'dismissed' });
-    res.json({ ok: true });
-  });
-
-  router.delete('/api/reminders/:id', async (req: Request, res: Response) => {
-    const reminder = await getReminderById(req.params.id as string);
-    if (!reminder) { res.status(404).json({ ok: false, error: 'Not found' }); return; }
-    await deleteReminder(req.params.id as string);
     res.json({ ok: true });
   });
 
@@ -549,6 +577,30 @@ export function createRouter(): Router {
         const userMessages = messages.filter((m) => !m.is_from_me);
         const botMessages = messages.filter((m) => m.is_from_me);
 
+        const sessionId = sessions[group.folder];
+        let contextPercent = 0;
+        const cached = contextCache[group.folder];
+        if (cached) {
+          contextPercent = cached.percent;
+        } else {
+          try {
+            const dbVal = await getRouterState(`context_pct:${group.folder}`);
+            if (dbVal) contextPercent = JSON.parse(dbVal).percent ?? 0;
+          } catch { /* ignore */ }
+        }
+
+        // Calculate attachment folder size
+        let attachmentSize = 0;
+        try {
+          const attachDir = path.join(resolveGroupFolderPath(group.folder), 'attachments');
+          if (fs.existsSync(attachDir)) {
+            for (const f of fs.readdirSync(attachDir)) {
+              if (f.startsWith('.')) continue;
+              try { attachmentSize += fs.statSync(path.join(attachDir, f)).size; } catch { /* skip */ }
+            }
+          }
+        } catch { /* dir doesn't exist */ }
+
         return {
           jid,
           name: group.name,
@@ -557,8 +609,12 @@ export function createRouter(): Router {
           totalMessages: messages.length,
           userMessages: userMessages.length,
           botMessages: botMessages.length,
-          hasSession: !!sessions[group.folder],
+          hasSession: !!sessionId,
           lastActivity: chat?.last_message_time,
+          transcriptSize: getTranscriptSize(group.folder, group.workDir),
+          currentTranscriptSize: sessionId ? getSessionTranscriptSize(group.folder, sessionId, group.workDir) : 0,
+          contextPercent,
+          attachmentSize,
         };
       }),
     );
@@ -573,6 +629,24 @@ export function createRouter(): Router {
         totalSessions: Object.keys(sessions).length,
       },
     });
+  });
+
+  // ── Claude Plan Usage (from Chrome extension relay) ──
+  router.post('/api/claude-usage', async (req: Request, res: Response) => {
+    const { session, weeklyAll, weeklySonnet, scrapedAt } = req.body;
+    const data = JSON.stringify({ session, weeklyAll, weeklySonnet, scrapedAt });
+    await setRouterState('claude_usage', data);
+    logger.info({ scrapedAt }, 'Claude usage data received from extension');
+    res.json({ ok: true });
+  });
+
+  router.get('/api/claude-usage', async (_req: Request, res: Response) => {
+    const raw = await getRouterState('claude_usage');
+    if (!raw) {
+      res.json({ ok: true, data: null });
+      return;
+    }
+    res.json({ ok: true, data: JSON.parse(raw) });
   });
 
   // ── Token Usage Analytics ──
@@ -730,7 +804,9 @@ export function createRouter(): Router {
           showInSidebar: group.showInSidebar !== false,
           idleTimeoutMinutes: group.idleTimeoutMinutes ?? null,
           allowedSkills: group.allowedSkills || [],
+          allowedMcpServers: group.allowedMcpServers || [],
           model: group.model || 'opus',
+          contextWindow: group.contextWindow || '200k',
           tokens,
         },
       });
@@ -763,6 +839,7 @@ export function createRouter(): Router {
         allowedSkills,
         mode,
         model,
+        requiresTrigger,
       } = req.body;
       const updated = { ...group };
       if (memoryMode !== undefined) updated.memoryMode = memoryMode;
@@ -773,10 +850,15 @@ export function createRouter(): Router {
       if (idleTimeoutMinutes !== undefined)
         updated.idleTimeoutMinutes = idleTimeoutMinutes;
       if (allowedSkills !== undefined) updated.allowedSkills = allowedSkills;
+      const allowedMcpServers = req.body.allowedMcpServers;
+      if (allowedMcpServers !== undefined) updated.allowedMcpServers = allowedMcpServers;
       if (mode !== undefined && mode === 'tmux')
         updated.mode = mode;
+      if (requiresTrigger !== undefined) updated.requiresTrigger = requiresTrigger;
       if (req.body.workDir !== undefined) updated.workDir = req.body.workDir || undefined;
       if (model !== undefined && (model === 'opus' || model === 'sonnet')) updated.model = model;
+      const contextWindow = req.body.contextWindow;
+      if (contextWindow !== undefined && (contextWindow === '200k' || contextWindow === '1m')) updated.contextWindow = contextWindow;
 
       await setRegisteredGroup(jid, updated);
       res.json({
@@ -1052,6 +1134,7 @@ export function createRouter(): Router {
         filepath,
       );
       if (!fs.existsSync(fullPath)) {
+        logger.warn({ folder, filepath, fullPath }, 'File not found when serving');
         res.status(404).json({ ok: false, error: 'File not found' });
         return;
       }
@@ -1135,6 +1218,24 @@ export function createRouter(): Router {
     res.json({ ok: true, data: commands });
   });
 
+  // ── MCP Servers (from ~/.claude.json) ──
+  router.get('/api/mcp-servers', (_req: Request, res: Response) => {
+    const homeClaudeJson = path.join(os.homedir(), '.claude.json');
+    const servers: Array<{ name: string; type: string }> = [];
+    try {
+      if (fs.existsSync(homeClaudeJson)) {
+        const parsed = JSON.parse(fs.readFileSync(homeClaudeJson, 'utf-8'));
+        const mcps = parsed.mcpServers || {};
+        for (const [name, config] of Object.entries(mcps)) {
+          if (name === 'nanoclaw') continue; // always included, not toggleable
+          const type = (config as any).type === 'http' ? 'http' : 'stdio';
+          servers.push({ name, type });
+        }
+      }
+    } catch {}
+    res.json({ ok: true, data: servers });
+  });
+
   // ── Skills ──
   router.get('/api/skills', (_req: Request, res: Response) => {
     const skills: Array<{
@@ -1167,20 +1268,23 @@ export function createRouter(): Router {
       }
     }
 
-    // Claude Code skills
-    const codeSkillsDir = path.resolve(process.cwd(), '.claude', 'skills');
-    if (fs.existsSync(codeSkillsDir)) {
-      for (const dir of fs.readdirSync(codeSkillsDir)) {
-        const skillFile = path.join(codeSkillsDir, dir, 'SKILL.md');
+    // Global user skills (~/.claude/skills/) — also synced by setupClaudeConfig
+    const globalSkillsDir = path.join(os.homedir(), '.claude', 'skills');
+    if (fs.existsSync(globalSkillsDir)) {
+      for (const dir of fs.readdirSync(globalSkillsDir)) {
+        const skillFile = path.join(globalSkillsDir, dir, 'SKILL.md');
         if (fs.existsSync(skillFile)) {
           const parsed = parseSkillFrontmatter(
             fs.readFileSync(skillFile, 'utf-8'),
           );
+          const name = parsed.name || dir;
+          // Skip if a container skill with the same name already exists
+          if (skills.some((s) => s.name === name)) continue;
           skills.push({
-            name: parsed.name || dir,
+            name,
             description: parsed.description || '',
-            type: 'claude-code',
-            folder: `.claude/skills/${dir}`,
+            type: 'global',
+            folder: `~/.claude/skills/${dir}`,
           });
         }
       }
@@ -1228,6 +1332,80 @@ export function createRouter(): Router {
       res.json({ ok: true });
     },
   );
+
+  // Tenjin monthly snapshot — GET reads from DB, POST fetches fresh from Tenjin + stores
+  router.get('/api/finance/tenjin-snapshots', async (_req: Request, res: Response) => {
+    try { res.json(await getAllTenjinSnapshots()); }
+    catch (e) { res.status(500).json({ error: String(e) }); }
+  });
+
+  router.get('/api/finance/tenjin-snapshot', async (req: Request, res: Response) => {
+    const month = String(req.query.month || '');
+    if (!month.match(/^\d{4}-\d{2}$/)) { res.status(400).json({ error: 'month required (YYYY-MM)' }); return; }
+    try {
+      const snap = await getTenjinSnapshot(month);
+      if (!snap) { res.status(404).json({ error: 'No snapshot for this month' }); return; }
+      res.json(snap);
+    } catch (e) { res.status(500).json({ error: String(e) }); }
+  });
+
+  router.post('/api/finance/tenjin-snapshot', async (req: Request, res: Response) => {
+    const month = String(req.body?.month || req.query.month || '');
+    if (!month.match(/^\d{4}-\d{2}$/)) { res.status(400).json({ error: 'month required (YYYY-MM)' }); return; }
+    try {
+      const snap = await fetchAndStoreTenjinSnapshot(month);
+      res.json(snap);
+    } catch (e) { res.status(500).json({ error: String(e) }); }
+  });
+
+  // Finance data endpoint
+  router.get('/api/finance/data', (req: Request, res: Response) => {
+    const dataPath = path.join(process.cwd(), 'groups', 'dashboard_po', 'attachments', 'pl_data.json');
+    if (!fs.existsSync(dataPath)) { res.status(404).json({ error: 'Data not available' }); return; }
+
+    const data = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
+
+    // Dynamically inject current month if missing
+    const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const curLabel = `${MON[now.getMonth()]}-${String(now.getFullYear()).slice(2)}*`;
+    const months: string[] = data.months || [];
+
+    // Remove asterisk from any non-current month entries
+    const fixedMonths = months.map((m: string) => {
+      const cleaned = m.replace('*', '');
+      const [mon, yr] = cleaned.split('-');
+      const mIdx = MON.indexOf(mon);
+      if (mIdx < 0 || !yr) return m;
+      const mYear = 2000 + parseInt(yr);
+      const isCurrent = mIdx === now.getMonth() && mYear === now.getFullYear();
+      return isCurrent ? `${cleaned}*` : cleaned;
+    });
+
+    const alreadyHasCurrent = fixedMonths.some((m: string) => m.endsWith('*'));
+    if (!alreadyHasCurrent) {
+      fixedMonths.push(curLabel);
+      // Append zero to every numeric array in the data structure
+      const appendZero = (obj: any) => {
+        if (!obj || typeof obj !== 'object') return;
+        for (const key of Object.keys(obj)) {
+          if (Array.isArray(obj[key]) && obj[key].length > 0 && typeof obj[key][0] === 'number') {
+            obj[key].push(0);
+          } else if (Array.isArray(obj[key]) && obj[key].length > 0 && typeof obj[key][0] === 'boolean') {
+            obj[key].push(false);
+          } else if (Array.isArray(obj[key]) && obj[key].length > 0 && obj[key][0] === null) {
+            obj[key].push(null);
+          } else {
+            appendZero(obj[key]);
+          }
+        }
+      };
+      appendZero(data);
+    }
+
+    data.months = fixedMonths;
+    res.json(data);
+  });
 
   return router;
 }

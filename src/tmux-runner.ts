@@ -27,7 +27,9 @@ const TMUX_BIN = process.env.TMUX_BIN || '/opt/homebrew/bin/tmux';
 const CLAUDE_BIN = process.env.CLAUDE_BIN || '/usr/local/bin/claude-lts';
 const TMUX_PREFIX = 'nanoclaw';
 const DONE_POLL_MS = 500;
-const DONE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min max per turn
+const DONE_TIMEOUT_MS = 15 * 60 * 1000; // 15 min max per turn
+const TRANSCRIPT_SIZE_LIMIT = 5 * 1024 * 1024; // 5MB — auto-fresh if exceeded
+const TRANSCRIPT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 export interface TmuxInput {
   prompt: string;
@@ -43,11 +45,19 @@ export interface TmuxOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  sessionResumed?: boolean;
   usage?: {
     input_tokens: number;
     cache_creation_input_tokens: number;
     cache_read_input_tokens: number;
     output_tokens: number;
+    contextWindow?: number;
+  };
+  performance?: {
+    durationMs: number;
+    durationApiMs: number;
+    numTurns: number;
+    costUsd: number;
   };
 }
 
@@ -100,6 +110,104 @@ function groupIpcDir(folder: string): string {
   return resolveGroupIpcPath(folder);
 }
 
+/**
+ * Claude Code stores session transcripts in ~/.claude/projects/-{cwd-with-dashes}/.
+ * Returns the transcript directory for a group's working directory.
+ */
+export function transcriptDir(folder: string, workDir?: string): string {
+  const cwd = groupWorkDir(folder, workDir);
+  const slug = cwd.replace(/[/_]/g, '-');
+  return path.join(os.homedir(), '.claude', 'projects', slug);
+}
+
+/**
+ * Check if the active session's transcript exceeds the size limit.
+ * Returns true if the session should be skipped (start fresh).
+ */
+function isTranscriptOversized(folder: string, sessionId: string, workDir?: string): boolean {
+  const dir = transcriptDir(folder, workDir);
+  const file = path.join(dir, `${sessionId}.jsonl`);
+  try {
+    const stat = fs.statSync(file);
+    if (stat.size > TRANSCRIPT_SIZE_LIMIT) {
+      logger.warn(
+        { folder, sessionId, sizeMB: (stat.size / 1024 / 1024).toFixed(1) },
+        'Transcript exceeds 5MB limit, starting fresh session',
+      );
+      return true;
+    }
+  } catch {
+    // File doesn't exist — fine, not oversized
+  }
+  return false;
+}
+
+/**
+ * Delete transcript files older than 7 days from the group's Claude projects dir.
+ */
+function cleanOldTranscripts(folder: string, workDir?: string): void {
+  const dir = transcriptDir(folder, workDir);
+  if (!fs.existsSync(dir)) return;
+
+  const cutoff = Date.now() - TRANSCRIPT_MAX_AGE_MS;
+  let cleaned = 0;
+  try {
+    for (const entry of fs.readdirSync(dir)) {
+      if (!entry.endsWith('.jsonl')) continue;
+      const filePath = path.join(dir, entry);
+      try {
+        const stat = fs.statSync(filePath);
+        if (stat.mtimeMs < cutoff) {
+          fs.unlinkSync(filePath);
+          cleaned++;
+        }
+      } catch {
+        // skip individual file errors
+      }
+    }
+    if (cleaned > 0) {
+      logger.info({ folder, cleaned }, 'Cleaned old transcript files');
+    }
+  } catch (err) {
+    logger.warn({ folder, err }, 'Failed to clean old transcripts');
+  }
+}
+
+/**
+ * Get the size of the current session's transcript file (in bytes).
+ */
+export function getSessionTranscriptSize(folder: string, sessionId: string, workDir?: string): number {
+  const dir = transcriptDir(folder, workDir);
+  const file = path.join(dir, `${sessionId}.jsonl`);
+  try {
+    return fs.statSync(file).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Get total size of all .jsonl transcript files for a group (in bytes).
+ */
+export function getTranscriptSize(folder: string, workDir?: string): number {
+  const dir = transcriptDir(folder, workDir);
+  if (!fs.existsSync(dir)) return 0;
+  let total = 0;
+  try {
+    for (const entry of fs.readdirSync(dir)) {
+      if (!entry.endsWith('.jsonl')) continue;
+      try {
+        total += fs.statSync(path.join(dir, entry)).size;
+      } catch {
+        // skip individual file errors
+      }
+    }
+  } catch {
+    // directory read error
+  }
+  return total;
+}
+
 function mcpServerPath(): string {
   return path.resolve(
     process.cwd(),
@@ -147,17 +255,46 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
           NANOCLAW_IPC_DIR: ipcDir,
         },
       },
-    },
+    } as Record<string, any>,
   };
 
   fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
 
-  // Copy user's .claude.json (auth, theme, preferences) to skip first-run setup.
-  // CLAUDE_CONFIG_DIR changes where .claude/ lives, but .claude.json must be
-  // at the same level as .claude/ (its parent directory).
+  // Merge allowed global MCP servers from ~/.claude.json into settings.json.
+  // Without this, agents only get the nanoclaw MCP server. Per-group
+  // allowedMcpServers controls which global MCPs (metabase, etc.) to include.
   const homeClaudeJson = path.join(os.homedir(), '.claude.json');
   const groupClaudeJson = path.join(claudeDir, '..', '.claude.json');
+  let homeClaudeParsed: any = null;
   if (fs.existsSync(homeClaudeJson)) {
+    try {
+      homeClaudeParsed = JSON.parse(fs.readFileSync(homeClaudeJson, 'utf-8'));
+      const globalMcps = homeClaudeParsed.mcpServers || {};
+      const allowed = group.allowedMcpServers || [];
+      const isAllMode = allowed.includes('__all__');
+      for (const [name, config] of Object.entries(globalMcps)) {
+        if (name === 'nanoclaw') continue; // already defined per-group
+        if (isAllMode || allowed.includes(name)) {
+          settings.mcpServers[name] = config as any;
+        }
+      }
+      // Re-write settings.json with any merged MCP servers
+      fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
+    } catch {
+      // JSON parse failed — settings.json already written above
+    }
+  }
+
+  // Copy user's .claude.json (auth, theme, preferences) to skip first-run setup.
+  // IMPORTANT: Strip mcpServers from the copy — MCP servers are controlled
+  // exclusively via settings.json. Without this, every agent inherits all
+  // MCP servers from ~/.claude.json (e.g. Metabase 68 tools), bloating the
+  // system prompt to 130K+ tokens and costing $0.49 per cold cache.
+  if (homeClaudeParsed) {
+    const stripped = { ...homeClaudeParsed };
+    delete stripped.mcpServers;
+    fs.writeFileSync(groupClaudeJson, JSON.stringify(stripped));
+  } else if (fs.existsSync(homeClaudeJson)) {
     fs.copyFileSync(homeClaudeJson, groupClaudeJson);
   }
 
@@ -181,6 +318,18 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
       fs.cpSync(srcDir, path.join(skillsDst, skillDir), { recursive: true });
     }
   }
+  // Also sync global user skills from ~/.claude/skills/ (e.g. create-skill)
+  // Container skills take precedence — global skills won't overwrite them
+  const globalSkillsSrc = path.join(os.homedir(), '.claude', 'skills');
+  if (fs.existsSync(globalSkillsSrc)) {
+    for (const skillDir of fs.readdirSync(globalSkillsSrc)) {
+      const srcDir = path.join(globalSkillsSrc, skillDir);
+      if (!fs.statSync(srcDir).isDirectory()) continue;
+      const dstDir = path.join(skillsDst, skillDir);
+      if (fs.existsSync(dstDir)) continue; // container skill takes precedence
+      fs.cpSync(srcDir, dstDir, { recursive: true });
+    }
+  }
 
   // Copy settings + skills into the group's working directory .claude/
   // so claude picks them up as project-level config (no CLAUDE_CONFIG_DIR needed)
@@ -198,6 +347,9 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
   // Create wrapper script for non-interactive `-p` mode
   // Auth + global MCPs come from ~/.claude.json
   // Per-group MCP scoping via env vars (nanoclaw MCP reads from process.env)
+  // Clean up old transcript files (> 7 days) on each session setup
+  cleanOldTranscripts(group.folder, group.workDir);
+
   const wrapper = `#!/bin/bash
 # Run claude-lts in print mode and write done marker on completion
 export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
@@ -205,7 +357,9 @@ export NANOCLAW_CHAT_JID="${chatJid}"
 export NANOCLAW_GROUP_FOLDER="${group.folder}"
 export NANOCLAW_IS_MAIN="${group.isMain ? '1' : '0'}"
 export NANOCLAW_IPC_DIR="${ipcDir}"
-MODEL="${group.model === 'sonnet' ? 'sonnet' : 'opus'}"
+MODEL="${group.contextWindow === '1m'
+  ? (group.model === 'sonnet' ? 'claude-sonnet-4-6[1m]' : 'claude-opus-4-6[1m]')
+  : (group.model === 'sonnet' ? 'sonnet' : 'opus')}"
 CLAUDE_BIN="${CLAUDE_BIN}"
 PROMPT_FILE="$1"
 SESSION_ARG="$2"
@@ -377,7 +531,12 @@ export async function runTmuxAgent(
 
   fs.writeFileSync(promptFile, input.prompt);
 
-  const sessionArg = input.sessionId || 'new';
+  // Check transcript size — skip resume if > 5MB to avoid corruption/slowness
+  let sessionArg = input.sessionId || 'new';
+  const willResume = sessionArg !== 'new';
+  if (willResume && isTranscriptOversized(input.groupFolder, sessionArg, group.workDir)) {
+    sessionArg = 'new';
+  }
 
   // Send wrapper command to tmux
   const tmuxCmd = `${TMUX_BIN} send-keys -t ${name} 'bash "${scriptPath}" "${promptFile}" "${sessionArg}" "${doneFile}"' Enter`;
@@ -407,6 +566,8 @@ export async function runTmuxAgent(
   let streamBuffer = ''; // Partial line buffer
   const emittedKeys = new Set<string>(); // Dedup across progressive snapshots
   let lastAssistantUsage: TmuxOutput['usage'] | undefined; // Track latest API call's usage
+  let resultContextWindow: number | undefined; // Context window from result event
+  let resultPerformance: TmuxOutput['performance'] | undefined; // Performance from result event
 
   function drainStreamLog(): void {
     if (!onStreamEvent || !fs.existsSync(streamLogFile)) return;
@@ -448,6 +609,13 @@ export async function runTmuxAgent(
               cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
               output_tokens: u.output_tokens ?? 0,
             };
+          }
+          // Extract contextWindow from result event's modelUsage
+          if (parsed.type === 'result' && parsed.modelUsage) {
+            const models = Object.values(parsed.modelUsage) as Array<{ contextWindow?: number }>;
+            if (models.length > 0 && models[0].contextWindow) {
+              resultContextWindow = models[0].contextWindow;
+            }
           }
         } catch { /* not JSON, skip */ }
         const events = parseStreamLine(trimmed, emittedKeys);
@@ -506,6 +674,14 @@ export async function runTmuxAgent(
                 );
                 newSessionId = resultEvent.session_id;
                 resultText = resultEvent.result || null;
+                if (resultEvent.duration_ms != null) {
+                  resultPerformance = {
+                    durationMs: resultEvent.duration_ms,
+                    durationApiMs: resultEvent.duration_api_ms ?? 0,
+                    numTurns: resultEvent.num_turns ?? 1,
+                    costUsd: resultEvent.total_cost_usd ?? 0,
+                  };
+                }
               } catch {
                 const sessionMatch = streamContent.match(
                   /"session_id":"([^"]+)"/,
@@ -538,6 +714,14 @@ export async function runTmuxAgent(
               );
               if (!newSessionId) newSessionId = resultEvent.session_id;
               if (!resultText) resultText = resultEvent.result || null;
+              if (!resultPerformance && resultEvent.duration_ms != null) {
+                resultPerformance = {
+                  durationMs: resultEvent.duration_ms,
+                  durationApiMs: resultEvent.duration_api_ms ?? 0,
+                  numTurns: resultEvent.num_turns ?? 1,
+                  costUsd: resultEvent.total_cost_usd ?? 0,
+                };
+              }
             } catch {
               const sessionMatch = paneOutput.match(/"session_id":"([^"]+)"/);
               if (sessionMatch && !newSessionId) newSessionId = sessionMatch[1];
@@ -569,11 +753,15 @@ export async function runTmuxAgent(
           status: data.exit_code === 0 ? 'success' : 'error',
           result: resultText,
           newSessionId: isRealSuccess ? newSessionId : undefined,
+          sessionResumed: willResume,
           error:
             data.exit_code !== 0
               ? `claude exited with code ${data.exit_code}`
               : undefined,
-          usage: lastAssistantUsage,
+          usage: lastAssistantUsage
+            ? { ...lastAssistantUsage, contextWindow: resultContextWindow }
+            : undefined,
+          performance: resultPerformance,
         };
 
         logger.info(
@@ -606,11 +794,19 @@ export async function runTmuxAgent(
     await new Promise((r) => setTimeout(r, DONE_POLL_MS));
   }
 
-  logger.error({ session: name, nonce }, 'Tmux turn timed out');
+  // Kill the tmux session on timeout — the retry will create a fresh one
+  logger.error({ session: name, nonce }, 'Tmux turn timed out, killing session');
+  killSession(input.groupFolder);
+
+  // Clean up temp files
+  try { fs.unlinkSync(doneFile); } catch { /* ignore */ }
+  try { fs.unlinkSync(`${doneFile}.stderr`); } catch { /* ignore */ }
+  try { fs.unlinkSync(doneFile.replace(/\.json$/, '.stream')); } catch { /* ignore */ }
+
   return {
     status: 'error',
     result: null,
-    error: 'Tmux turn timed out after 30 minutes',
+    error: 'Tmux turn timed out after 15 minutes',
   };
 }
 
