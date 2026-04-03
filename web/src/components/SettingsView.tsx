@@ -41,6 +41,7 @@ interface EmailRuleRow {
   body_pattern: string;
   action: string;
   target_group: string;
+  command_name: string;
   extract_prompt: string;
   enabled: boolean;
   created_at: string;
@@ -80,7 +81,7 @@ export function SettingsView({ groups }: { groups: Group[] }) {
   const [extractionStats, setExtractionStats] = useState<{ today: { calls: number; input_tokens: number; output_tokens: number }; week: { calls: number; input_tokens: number; output_tokens: number }; total: { calls: number; input_tokens: number; output_tokens: number }; byType: Record<string, number> } | null>(null);
   const [showRuleCreate, setShowRuleCreate] = useState(false);
   const [editingRule, setEditingRule] = useState<string | null>(null);
-  const [ruleForm, setRuleForm] = useState({ name: '', priority: 100, from_pattern: '', subject_pattern: '', body_pattern: '', action: 'forward' as string, target_group: '', extract_prompt: '', enabled: true });
+  const [ruleForm, setRuleForm] = useState({ name: '', priority: 100, from_pattern: '', subject_pattern: '', body_pattern: '', action: 'forward' as 'forward' | 'archive' | 'discard' | 'command', target_group: '', command_name: '', extract_prompt: '', enabled: true });
 
   // Move-to-shared state
   const [movingMemory, setMovingMemory] = useState<string | null>(null);
@@ -502,7 +503,7 @@ export function SettingsView({ groups }: { groups: Group[] }) {
           <div style={{ padding: '0 16px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div className="section-label" style={{ padding: 0 }}>Email Routing Rules</div>
             <button className="btn btn-sm btn-blue" onClick={() => {
-              setRuleForm({ name: '', priority: (emailRules.length + 1) * 10, from_pattern: '', subject_pattern: '', body_pattern: '', action: 'forward', target_group: '', extract_prompt: '', enabled: true });
+              setRuleForm({ name: '', priority: (emailRules.length + 1) * 10, from_pattern: '', subject_pattern: '', body_pattern: '', action: 'forward', target_group: '', command_name: '', extract_prompt: '', enabled: true });
               setShowRuleCreate(!showRuleCreate);
               setEditingRule(null);
             }}>
@@ -617,7 +618,7 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                     {rule.enabled ? 'Disable' : 'Enable'}
                   </button>
                   <button className="btn btn-sm btn-outline" onClick={() => {
-                    setRuleForm({ name: rule.name, priority: rule.priority, from_pattern: rule.from_pattern, subject_pattern: rule.subject_pattern, body_pattern: rule.body_pattern, action: rule.action, target_group: rule.target_group, extract_prompt: rule.extract_prompt || '', enabled: rule.enabled });
+                    setRuleForm({ name: rule.name, priority: rule.priority, from_pattern: rule.from_pattern, subject_pattern: rule.subject_pattern, body_pattern: rule.body_pattern, action: rule.action as any, target_group: rule.target_group, command_name: (rule as any).command_name || '', extract_prompt: rule.extract_prompt || '', enabled: rule.enabled });
                     setEditingRule(rule.id);
                     setShowRuleCreate(false);
                   }}>

@@ -27,7 +27,7 @@ Single Node.js process. Channels (WhatsApp, Telegram, Slack, Discord, Gmail) sel
 - **tmux-only** — no containers. Each group gets a tmux session running `claude-lts -p`
 - **MCP tools** — agents communicate via `ipc-mcp-stdio.js` (send_message, todos, tasks, memory, etc.)
 - **IPC** — file-based per-group messaging in `groups/{folder}/ipc/`
-- **Skills** sync every turn via `setupClaudeConfig` — no restart needed
+- **Skills** sync every turn via `setupClaudeConfig` — no restart needed. Syncs both `container/skills/` and `~/.claude/skills/` (global user skills)
 - **MCP tools** are negotiated once at session start — new tools require new session
 - **Session commands** — `/context`, `/compact`, `/new` intercepted by orchestrator
 
@@ -66,19 +66,29 @@ Single Node.js process. Channels (WhatsApp, Telegram, Slack, Discord, Gmail) sel
 
 ### Todos & Reminders (unified model)
 - Reminders are a property on todos (`remind_at` field), **not** a separate entity
-- Legacy `reminders` table still exists; `add_reminder` MCP tool creates todos with `remind_at`
+- Legacy `reminders` table and `add_reminder` MCP tools have been removed — use `add_todo` with `remind_at` and `recurrence` params
 - `reminder_fired_at` tracks fired reminders (keeps `remind_at` for overdue display)
-- Recurring reminders recompute `remind_at` from `recurrence` cron expression
+- Recurring todos use preset `recurrence` values: daily, weekday, weekly, monthly, yearly
+- Completing a recurring todo advances `due_date` to the next occurrence instead of marking done
+- Daily digest at 5 AM sends each user's upcoming/overdue todos to their main group
 - **All dates MUST be stored in UTC ISO format** — timezone offset strings break comparisons
 
 ### Context%
-- Calculated from stream usage: `(input + cache_creation + cache_read) / 1M * 100`
+- Calculated from last assistant event usage: `(input + cache_creation + cache_read) / contextWindow * 100`
+- Context window size (200K for Opus/Sonnet) extracted from `result` event's `modelUsage.contextWindow`, fallback 200K
 - Persisted to Turso via `setRouterState('context_pct:{folder}', ...)`
 - API falls back: in-memory cache -> DB -> 0
 
+### Attachments & Images
+- Uploaded files stored in `groups/{folder}/attachments/`
+- `send_message` MCP tool supports `filePath` param for outbound file sending
+- Inbound images: `expandAttachments()` rewrites `[Photo: file]` → "Use Read tool to view at: {path}"
+- **Images are auto-compressed in-place** on upload and before each agent turn (768px max, JPEG q60 via Sharp). Reading images costs ~500-800 tokens instead of 5-15K.
+- **All dates MUST be stored in UTC ISO format** — timezone offset strings break comparisons
+
 ## Skills
 
-Four types of skills exist. See [CONTRIBUTING.md](CONTRIBUTING.md) for taxonomy and guidelines.
+Four types of skills exist. See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for taxonomy and guidelines.
 
 - **Feature skills** — merge a `skill/*` branch to add capabilities (e.g. `/add-telegram`, `/add-slack`)
 - **Utility skills** — ship code files alongside SKILL.md (e.g. `/claw`)
@@ -99,7 +109,7 @@ Four types of skills exist. See [CONTRIBUTING.md](CONTRIBUTING.md) for taxonomy 
 
 ## Contributing
 
-Before creating a PR, adding a skill, or preparing any contribution, you MUST read [CONTRIBUTING.md](CONTRIBUTING.md).
+Before creating a PR, adding a skill, or preparing any contribution, you MUST read [CONTRIBUTING.md](docs/CONTRIBUTING.md).
 
 ## Development Rules
 

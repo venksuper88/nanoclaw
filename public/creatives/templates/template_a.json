@@ -1,0 +1,42 @@
+{
+  "id": "template_a",
+  "name": "Template A",
+  "canvas": { "width": 1200, "height": 1200 },
+  "zones": [
+    {
+      "id": "background",
+      "type": "image",
+      "position": { "top": 0, "left": 0 },
+      "size": { "width": "100%", "height": "100%" },
+      "fit": "cover",
+      "label": "Background Image"
+    },
+    {
+      "id": "logo",
+      "type": "image",
+      "position": { "top": 40, "left": "50%", "translateX": "-50%" },
+      "size": { "width": 280, "height": "auto" },
+      "filter": "drop-shadow(0 4px 14px rgba(0,0,0,0.6))",
+      "label": "Logo"
+    },
+    {
+      "id": "headline",
+      "type": "text",
+      "position": { "top": 290, "left": 80 },
+      "size": { "width": 1040, "height": 320 },
+      "style": "goldenHeadline",
+      "defaultText": "Build Your Railway\nEmpire Now!",
+      "label": "Headline"
+    },
+    {
+      "id": "cta_button",
+      "type": "button",
+      "position": { "top": 930, "left": "50%", "translateX": "-50%" },
+      "size": { "width": 560, "height": 120 },
+      "backgroundAsset": "button.png",
+      "style": "whiteButtonText",
+      "defaultText": "Start Free Today!",
+      "label": "CTA Button"
+    }
+  ]
+}

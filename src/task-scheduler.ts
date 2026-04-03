@@ -3,9 +3,7 @@ import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 
 import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
-import {
-  writeTasksSnapshot,
-} from './ipc-snapshots.js';
+import { writeTasksSnapshot } from './ipc-snapshots.js';
 import {
   ensureSession as ensureTmuxSession,
   runTmuxAgent,
@@ -17,6 +15,9 @@ import {
   getDueTasks,
   getDueTodoReminders,
   getTaskById,
+  getTodosByUser,
+  getRouterState,
+  setRouterState,
   logTaskRun,
   storeMessage,
   updateTask,
@@ -27,7 +28,13 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { dashboardEvents } from './dashboard/events.js';
-import { AgentOutput, RegisteredGroup, ScheduledTask } from './types.js';
+import {
+  AgentOutput,
+  RegisteredGroup,
+  ScheduledTask,
+  groupHasUser,
+  getGroupUserIds,
+} from './types.js';
 
 /**
  * Compute the next run time for a recurring task, anchored to the
@@ -226,7 +233,9 @@ async function runTask(
         timestamp,
         is_from_me: true,
         is_bot_message: true,
-      }).catch((err) => logger.warn({ err }, 'storeMessage (task stream) failed'));
+      }).catch((err) =>
+        logger.warn({ err }, 'storeMessage (task stream) failed'),
+      );
     };
 
     const output = await runTmuxAgent(
@@ -293,6 +302,61 @@ async function runTask(
   await updateTaskAfterRun(task.id, nextRun, resultSummary);
 }
 
+// Track last digest date per user to avoid duplicate sends (persisted to DB)
+const lastDigestDate: Record<string, string> = {};
+let digestStateLoaded = false;
+
+const DIGEST_HOUR = 5; // 5:00 AM local time
+
+function formatTodoDigest(
+  todos: { title: string; due_date: string | null; priority: string }[],
+): string {
+  if (todos.length === 0) return '';
+
+  const now = new Date();
+  const overdue = todos.filter((t) => t.due_date && new Date(t.due_date) < now);
+  const dated = todos
+    .filter((t) => t.due_date && new Date(t.due_date) >= now)
+    .sort(
+      (a, b) =>
+        new Date(a.due_date!).getTime() - new Date(b.due_date!).getTime(),
+    );
+  const undated = todos.filter((t) => !t.due_date);
+
+  const lines: string[] = [
+    `📋 **Daily Todos** — ${now.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })}`,
+  ];
+
+  if (overdue.length > 0) {
+    lines.push('', '🔴 **Overdue:**');
+    for (const t of overdue) {
+      const flag = t.priority === 'high' ? ' ⚡' : '';
+      lines.push(
+        `• ${t.title}${flag} — due ${new Date(t.due_date!).toLocaleDateString([], { month: 'short', day: 'numeric' })}`,
+      );
+    }
+  }
+  if (dated.length > 0) {
+    lines.push('', '📅 **Upcoming:**');
+    for (const t of dated) {
+      const flag = t.priority === 'high' ? ' ⚡' : '';
+      lines.push(
+        `• ${t.title}${flag} — ${new Date(t.due_date!).toLocaleDateString([], { month: 'short', day: 'numeric' })}`,
+      );
+    }
+  }
+  if (undated.length > 0) {
+    lines.push('', '📌 **No due date:**');
+    for (const t of undated) {
+      const flag = t.priority === 'high' ? ' ⚡' : '';
+      lines.push(`• ${t.title}${flag}`);
+    }
+  }
+
+  lines.push('', `${todos.length} total todo${todos.length === 1 ? '' : 's'}`);
+  return lines.join('\n');
+}
+
 let schedulerRunning = false;
 
 export function startSchedulerLoop(deps: SchedulerDependencies): void {
@@ -332,17 +396,20 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         const userToken = tokens.find((t) => {
           if (!t.reminder_group_jid) return false;
           const grp = groups[t.reminder_group_jid];
-          return grp && (grp.memoryUserId || 'venky') === todo.user_id;
+          return grp && groupHasUser(grp.memoryUserId, todo.user_id);
         });
 
         let targetJid: string;
         if (userToken?.reminder_group_jid) {
           targetJid = userToken.reminder_group_jid;
         } else {
-          const entries = Object.entries(groups).filter(
-            ([, g]) => (g.memoryUserId || 'venky') === todo.user_id,
+          const entries = Object.entries(groups).filter(([, g]) =>
+            groupHasUser(g.memoryUserId, todo.user_id),
           );
-          const targetEntry = entries.find(([, g]) => g.isMain) || entries.find(([, g]) => g.mode === 'tmux') || entries[0];
+          const targetEntry =
+            entries.find(([, g]) => g.isMain) ||
+            entries.find(([, g]) => g.mode === 'tmux') ||
+            entries[0];
           if (!targetEntry) continue;
           targetJid = targetEntry[0];
         }
@@ -356,7 +423,9 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         const now = new Date().toISOString();
         if (todo.recurrence) {
           try {
-            const cron = CronExpressionParser.parse(todo.recurrence, { tz: TIMEZONE });
+            const cron = CronExpressionParser.parse(todo.recurrence, {
+              tz: TIMEZONE,
+            });
             const nextRemind = cron.next().toISOString();
             await updateTodo(todo.id, { remind_at: nextRemind } as any);
           } catch {
@@ -365,7 +434,97 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         } else {
           await updateTodo(todo.id, { reminder_fired_at: now } as any);
         }
-        logger.info({ todoId: todo.id, userId: todo.user_id }, 'Todo reminder fired');
+        logger.info(
+          { todoId: todo.id, userId: todo.user_id },
+          'Todo reminder fired',
+        );
+      }
+
+      // Daily todo digest — send at DIGEST_HOUR local time
+      const nowLocal = new Date(
+        new Date().toLocaleString('en-US', { timeZone: TIMEZONE }),
+      );
+      const todayKey = nowLocal.toISOString().slice(0, 10);
+      if (nowLocal.getHours() >= DIGEST_HOUR) {
+        // Load persisted digest state on first run (survives restarts)
+        if (!digestStateLoaded) {
+          try {
+            const saved = await getRouterState('last_digest_dates');
+            if (saved) Object.assign(lastDigestDate, JSON.parse(saved));
+          } catch {}
+          digestStateLoaded = true;
+        }
+        const groups = deps.registeredGroups();
+        // Collect unique users and resolve target group per user.
+        // Priority: token's reminder_group_jid > isMain group > first group
+        const allUsers = new Set<string>();
+        for (const group of Object.values(groups)) {
+          for (const uid of getGroupUserIds(group.memoryUserId))
+            allUsers.add(uid);
+        }
+
+        const userGroups = new Map<string, string>();
+        for (const userId of allUsers) {
+          // 1. Check token preference (same logic as individual reminders)
+          const userToken = tokens.find((t) => {
+            if (!t.reminder_group_jid) return false;
+            const grp = groups[t.reminder_group_jid];
+            return grp && groupHasUser(grp.memoryUserId, userId);
+          });
+          if (userToken?.reminder_group_jid) {
+            userGroups.set(userId, userToken.reminder_group_jid);
+            continue;
+          }
+          // 2. Fallback: isMain > tmux > first match
+          const entries = Object.entries(groups).filter(([, g]) =>
+            groupHasUser(g.memoryUserId, userId),
+          );
+          const target =
+            entries.find(([, g]) => g.isMain) ||
+            entries.find(([, g]) => g.mode === 'tmux') ||
+            entries[0];
+          if (target) userGroups.set(userId, target[0]);
+        }
+
+        for (const [userId, targetJid] of userGroups) {
+          if (lastDigestDate[userId] === todayKey) continue;
+
+          const todos = await getTodosByUser(userId, false);
+          if (todos.length === 0) {
+            lastDigestDate[userId] = todayKey;
+            setRouterState(
+              'last_digest_dates',
+              JSON.stringify(lastDigestDate),
+            ).catch(() => {});
+            continue;
+          }
+
+          const msg = formatTodoDigest(todos);
+          await deps.sendMessage(targetJid, msg);
+          // Persist digest to DB so it survives page refresh
+          const now = new Date().toISOString();
+          storeMessage({
+            id: `digest-${userId}-${todayKey}`,
+            chat_jid: targetJid,
+            sender: ASSISTANT_NAME,
+            sender_name: ASSISTANT_NAME,
+            content: msg,
+            timestamp: now,
+            is_from_me: false,
+            is_bot_message: true,
+          }).catch((err) =>
+            logger.warn({ err }, 'storeMessage (digest) failed'),
+          );
+          lastDigestDate[userId] = todayKey;
+          setRouterState(
+            'last_digest_dates',
+            JSON.stringify(lastDigestDate),
+          ).catch(() => {});
+          logger.info(
+            { userId, targetJid, todoCount: todos.length },
+            'Daily todo digest sent',
+          );
+        }
       }
     } catch (err) {
       logger.error({ err }, 'Error in scheduler loop');

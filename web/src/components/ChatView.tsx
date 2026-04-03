@@ -12,6 +12,7 @@ interface Message {
   timestamp: string;
   isFromMe: boolean;
   isBotMessage: boolean;
+  isStateless?: boolean;
 }
 
 interface Props {
@@ -28,7 +29,7 @@ interface Props {
   reconnectKey: number;
 }
 
-interface Command { command: string; description: string; }
+interface Command { command: string; description: string; prefix?: string; }
 
 const COLORS = ['#C4B5E3','#A5D6A7','#FFD54F','#90CAF9','#CE93D8','#F48FB1','#80CBC4','#FFAB91'];
 function avatarColor(s: string): string {
@@ -45,9 +46,11 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [stateless, setStateless] = useState(false);
   const [commands, setCommands] = useState<Command[]>([]);
   const [showCommands, setShowCommands] = useState(false);
   const [cmdFilter, setCmdFilter] = useState('');
+  const [cmdPrefix, setCmdPrefix] = useState('/');
   const [selectedCmd, setSelectedCmd] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const topRef = useRef<HTMLDivElement>(null);
@@ -67,8 +70,8 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
   const PAGE_SIZE = 50;
 
   useEffect(() => {
-    api.getCommands().then(r => { if (r.ok) setCommands(r.data); }).catch(() => {});
-  }, []);
+    api.getCommands(selectedGroup?.folder).then(r => { if (r.ok) setCommands(r.data); }).catch(() => {});
+  }, [selectedGroup?.folder]);
 
   useEffect(() => {
     if (!showCommands) return;
@@ -286,8 +289,11 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
   const onInputChange = (val: string) => {
     setInput(val);
     if (selectedJid) saveDraft(selectedJid, val);
-    if (val.startsWith('/') && !val.includes(' ')) {
-      setCmdFilter(val.slice(1).toLowerCase());
+    if ((val.startsWith('/') || val.startsWith('!')) && !val.includes(' ')) {
+      const prefix = val[0];
+      const filter = val.slice(1).toLowerCase();
+      setCmdFilter(filter);
+      setCmdPrefix(prefix);
       setShowCommands(true);
       setSelectedCmd(0);
     } else {
@@ -295,10 +301,15 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
     }
   };
 
-  const filteredCommands = showCommands ? commands.filter(c => c.command.toLowerCase().includes(cmdFilter)) : [];
+  const filteredCommands = showCommands ? commands.filter(c => {
+    const matchesFilter = c.command.toLowerCase().includes(cmdFilter);
+    if (cmdPrefix === '!') return matchesFilter && (c as any).prefix === '!';
+    return matchesFilter && (c as any).prefix !== '!';
+  }) : [];
 
   const selectCommand = (cmd: Command) => {
-    const text = `/${cmd.command} `;
+    const prefix = cmd.prefix || '/';
+    const text = `${prefix}${cmd.command} `;
     setInput(text);
     if (inputRef.current) (inputRef.current as any).innerText = text;
     setShowCommands(false);
@@ -356,9 +367,10 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
     // Don't send empty message (all uploads failed, no text)
     if (!msgText) { setSending(false); return; }
 
-    setMessages(p => [...p, { id: `l-${Date.now()}`, senderName: 'You', content: msgText, timestamp: new Date().toISOString(), isFromMe: true, isBotMessage: false }]);
-    try { await api.sendChat(selectedJid, msgText); } catch {}
+    setMessages(p => [...p, { id: `l-${Date.now()}`, senderName: 'You', content: msgText, timestamp: new Date().toISOString(), isFromMe: true, isBotMessage: false, isStateless: stateless }]);
+    try { await api.sendChat(selectedJid, msgText, stateless || undefined); } catch {}
     setSending(false);
+    if (stateless) setStateless(false); // Reset toggle after sending
     (inputRef.current as any)?.focus();
   };
 
@@ -530,6 +542,11 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
             <span className="typing-dots"><span>.</span><span>.</span><span>.</span></span>
             <span>{selectedGroup?.name} is thinking</span>
             <span className="processing-badge">Processing</span>
+            {selectedJid && (
+              <button className="stop-agent-btn" onClick={() => { api.interruptSession(selectedJid); }} title="Stop current turn">
+                <span className="mi" style={{ fontSize: 16 }}>stop_circle</span>
+              </button>
+            )}
           </div>
         )}
         <div ref={bottomRef} />
@@ -554,7 +571,7 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
         <div className="cmd-menu" ref={cmdMenuRef}>
           {filteredCommands.map((cmd, i) => (
             <div key={cmd.command} className={`cmd-item ${i === selectedCmd ? 'selected' : ''}`} onClick={() => selectCommand(cmd)}>
-              <span className="cmd-name">/{cmd.command}</span>
+              <span className="cmd-name">{cmd.prefix || '/'}{cmd.command}</span>
               <span className="cmd-desc">{cmd.description}</span>
             </div>
           ))}
@@ -581,12 +598,31 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
         </div>
       )}
 
+      {/* Stateless mode indicator */}
+      {stateless && (
+        <div className="stateless-indicator">
+          <span className="mi" style={{ fontSize: 15 }}>bolt</span>
+          <span>Fresh session — no history</span>
+          <button className="stateless-dismiss" onClick={() => setStateless(false)}>
+            <span className="mi" style={{ fontSize: 14 }}>close</span>
+          </button>
+        </div>
+      )}
+
       {/* Floating input */}
       <div className="chat-input-bar">
         <label className="attach-btn">
           <span className="mi">attach_file</span>
           <input type="file" style={{ display: 'none' }} onChange={upload} multiple />
         </label>
+        <button
+          type="button"
+          className={`stateless-toggle${stateless ? ' active' : ''}`}
+          onClick={() => setStateless(s => !s)}
+          title={stateless ? 'Stateless mode on — tap to switch back' : 'Switch to stateless (fresh session)'}
+        >
+          <span className="mi" style={{ fontSize: 20 }}>bolt</span>
+        </button>
         <div
           ref={inputRef as any}
           className="chat-editable"

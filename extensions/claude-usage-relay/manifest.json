@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "DevenClaw Claude Usage Relay",
+  "version": "1.1.0",
+  "description": "Relays Claude usage data to DevenClaw dashboard",
+  "permissions": ["alarms"],
+  "host_permissions": ["https://claude.ai/*", "https://mc.neved.in/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://claude.ai/settings/usage*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

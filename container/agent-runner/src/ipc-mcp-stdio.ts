@@ -45,6 +45,7 @@ server.tool(
   {
     text: z.string().describe('The message text to send'),
     sender: z.string().optional().describe('Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.'),
+    filePath: z.string().optional().describe('Absolute path to a file to send as attachment (image, document, etc). The file must exist on disk.'),
   },
   async (args) => {
     const data: Record<string, string | undefined> = {
@@ -52,6 +53,7 @@ server.tool(
       chatJid,
       text: args.text,
       sender: args.sender || undefined,
+      filePath: args.filePath || undefined,
       groupFolder,
       timestamp: new Date().toISOString(),
     };
@@ -319,12 +321,15 @@ For project-specific agents, use the workDir parameter to set the agent's workin
       };
     }
 
-    const data: Record<string, string | undefined> = {
+    // Dashboard agents default to requiresTrigger=false (respond to any message)
+    const requiresTrigger = args.folder.startsWith('dashboard_') ? false : true;
+    const data: Record<string, string | boolean | undefined> = {
       type: 'register_group',
       jid: args.jid,
       name: args.name,
       folder: args.folder,
       trigger: args.trigger,
+      requiresTrigger,
       workDir: args.workDir,
       timestamp: new Date().toISOString(),
     };
@@ -375,12 +380,14 @@ Good examples:
 
 server.tool(
   'add_todo',
-  'Add a todo item for the user. Supports priority levels and optional due dates. The todo will appear in the Todos tab of Mission Control.',
+  'Add a todo item for the user. Supports priority, due dates, reminders, and recurrence. The todo will appear in the Todos tab of Mission Control. Use this for BOTH todos and reminders — a reminder is just a todo with remind_at set.',
   {
     title: z.string().describe('Short description of the todo'),
     data: z.string().optional().describe('Additional notes or context (supports markdown)'),
     priority: z.enum(['low', 'medium', 'high']).optional().describe('Priority level (default: medium)'),
     due_date: z.string().optional().describe('Due date as ISO timestamp (e.g., "2026-03-27T09:00:00Z")'),
+    remind_at: z.string().optional().describe('When to send a reminder notification — ISO timestamp (e.g., "2026-03-27T09:00:00+05:30")'),
+    recurrence: z.enum(['daily', 'weekday', 'weekly', 'monthly', 'yearly']).optional().describe('Repeat schedule — todo auto-advances when completed'),
   },
   async (args) => {
     writeIpcFile(TASKS_DIR, {
@@ -389,6 +396,8 @@ server.tool(
       data: args.data,
       priority: args.priority || 'medium',
       due_date: args.due_date,
+      remind_at: args.remind_at,
+      recurrence: args.recurrence,
       groupFolder,
       timestamp: new Date().toISOString(),
     });
@@ -398,7 +407,7 @@ server.tool(
 
 server.tool(
   'update_todo',
-  'Update an existing todo item — change title, notes, status, priority, or due date.',
+  'Update an existing todo item — change title, notes, status, priority, due date, reminder, or recurrence.',
   {
     todo_id: z.string().describe('The todo ID to update'),
     title: z.string().optional().describe('New title'),
@@ -406,6 +415,8 @@ server.tool(
     status: z.enum(['pending', 'in_progress', 'done']).optional().describe('New status'),
     priority: z.enum(['low', 'medium', 'high']).optional().describe('New priority'),
     due_date: z.string().optional().describe('New due date (ISO timestamp)'),
+    remind_at: z.string().optional().describe('New reminder time (ISO timestamp)'),
+    recurrence: z.enum(['daily', 'weekday', 'weekly', 'monthly', 'yearly']).optional().describe('Repeat schedule'),
   },
   async (args) => {
     writeIpcFile(TASKS_DIR, {
@@ -416,6 +427,8 @@ server.tool(
       status: args.status,
       priority: args.priority,
       due_date: args.due_date,
+      remind_at: args.remind_at,
+      recurrence: args.recurrence,
       groupFolder,
       timestamp: new Date().toISOString(),
     });
@@ -479,119 +492,66 @@ server.tool(
       const check = t.status === 'done' ? '✅' : t.status === 'in_progress' ? '🔄' : '⬜';
       const pri = t.priority === 'high' ? '🔴' : t.priority === 'medium' ? '🟡' : '🟢';
       const due = t.due_date ? ` (due: ${t.due_date})` : '';
-      return `${check} ${pri} **${t.title}**${due}\n   ID: \`${t.id}\``;
+      const remind = t.remind_at ? ` 🔔 ${t.remind_at}` : '';
+      const recur = t.recurrence ? ` 🔁 ${t.recurrence}` : '';
+      return `${check} ${pri} **${t.title}**${due}${remind}${recur}\n   ID: \`${t.id}\``;
     });
     return { content: [{ type: 'text' as const, text: lines.join('\n\n') }] };
   },
 );
 
-// ── Reminders ──
 
 server.tool(
-  'add_reminder',
-  'Set a reminder for the user. The reminder will fire at the specified time and notify the user via chat and push notification.',
+  'run_command',
+  `Run a command (script) available to this group. Commands are like skills but don't need an LLM — they're scripts with a standard interface.
+
+Resolution: group-local commands take precedence over global ones (like skills).
+Execution: the command runs as a child process with JSON input/output. Lifecycle messages (start, complete, error) are sent to the group chat automatically.
+
+Use list_commands first to see what's available.`,
   {
-    title: z.string().describe('What to remind about'),
-    data: z.string().optional().describe('Additional context (supports markdown)'),
-    remind_at: z.string().describe('When to remind — ISO timestamp (e.g., "2026-03-27T09:00:00+05:30")'),
-    recurrence: z.string().optional().describe('Optional cron expression for recurring reminders (e.g., "0 9 * * *" for daily at 9 AM)'),
+    command_name: z.string().describe('Name of the command to run (e.g., "process-txn")'),
+    input: z.record(z.string(), z.unknown()).optional().describe('JSON input to pass to the command via stdin'),
   },
   async (args) => {
-    writeIpcFile(TASKS_DIR, {
-      type: 'add_reminder',
-      title: args.title,
-      data: args.data,
-      remind_at: args.remind_at,
-      recurrence: args.recurrence,
+    const data = {
+      type: 'run_command',
+      commandName: args.command_name,
+      input: args.input || {},
       groupFolder,
+      chatJid,
       timestamp: new Date().toISOString(),
-    });
-    return { content: [{ type: 'text' as const, text: `Reminder set: "${args.title}" at ${args.remind_at} [View Todos](#todos)` }] };
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    return {
+      content: [{ type: 'text' as const, text: `Command "${args.command_name}" execution requested. Lifecycle messages will be sent to the group chat.` }],
+    };
   },
 );
 
 server.tool(
-  'update_reminder',
-  'Update an existing reminder.',
-  {
-    reminder_id: z.string().describe('The reminder ID to update'),
-    title: z.string().optional().describe('New title'),
-    data: z.string().optional().describe('New context'),
-    remind_at: z.string().optional().describe('New reminder time (ISO timestamp)'),
-    recurrence: z.string().optional().describe('New cron expression'),
-  },
-  async (args) => {
-    writeIpcFile(TASKS_DIR, {
-      type: 'update_reminder',
-      reminderId: args.reminder_id,
-      title: args.title,
-      data: args.data,
-      remind_at: args.remind_at,
-      recurrence: args.recurrence,
-      groupFolder,
-      timestamp: new Date().toISOString(),
-    });
-    return { content: [{ type: 'text' as const, text: `Reminder ${args.reminder_id} updated.` }] };
-  },
-);
-
-server.tool(
-  'dismiss_reminder',
-  'Dismiss a reminder (mark as done, no more notifications).',
-  {
-    reminder_id: z.string().describe('The reminder ID to dismiss'),
-  },
-  async (args) => {
-    writeIpcFile(TASKS_DIR, {
-      type: 'dismiss_reminder',
-      reminderId: args.reminder_id,
-      groupFolder,
-      timestamp: new Date().toISOString(),
-    });
-    return { content: [{ type: 'text' as const, text: `Reminder ${args.reminder_id} dismissed.` }] };
-  },
-);
-
-server.tool(
-  'snooze_reminder',
-  'Snooze a reminder to a later time.',
-  {
-    reminder_id: z.string().describe('The reminder ID to snooze'),
-    snooze_until: z.string().describe('New time to be reminded — ISO timestamp'),
-  },
-  async (args) => {
-    writeIpcFile(TASKS_DIR, {
-      type: 'snooze_reminder',
-      reminderId: args.reminder_id,
-      snooze_until: args.snooze_until,
-      groupFolder,
-      timestamp: new Date().toISOString(),
-    });
-    return { content: [{ type: 'text' as const, text: `Reminder ${args.reminder_id} snoozed until ${args.snooze_until}.` }] };
-  },
-);
-
-server.tool(
-  'list_reminders',
-  "List the user's active and snoozed reminders.",
+  'list_commands',
+  'List all commands (scripts) available to this group. Shows both group-local and global commands.',
   {},
   async () => {
-    const snapshotFile = path.join(IPC_DIR, 'current_reminders.json');
-    if (!fs.existsSync(snapshotFile)) {
-      return { content: [{ type: 'text' as const, text: 'No reminders found.' }] };
+    const commandsFile = path.join(IPC_DIR, 'current_commands.json');
+    if (!fs.existsSync(commandsFile)) {
+      return { content: [{ type: 'text' as const, text: 'No commands available.' }] };
     }
-    const reminders = JSON.parse(fs.readFileSync(snapshotFile, 'utf-8'));
-    const active = reminders.filter((r: any) => r.status === 'active' || r.status === 'snoozed');
-    if (active.length === 0) {
-      return { content: [{ type: 'text' as const, text: 'No active reminders.' }] };
+    try {
+      const commands = JSON.parse(fs.readFileSync(commandsFile, 'utf-8'));
+      if (commands.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No commands available.' }] };
+      }
+      const formatted = commands
+        .map((c: { name: string; description: string }) => `- **${c.name}**: ${c.description}`)
+        .join('\n');
+      return { content: [{ type: 'text' as const, text: `Available commands:\n${formatted}` }] };
+    } catch {
+      return { content: [{ type: 'text' as const, text: 'Error reading commands list.' }] };
     }
-    const lines = active.map((r: any) => {
-      const icon = r.status === 'snoozed' ? '💤' : '🔔';
-      const time = r.status === 'snoozed' ? r.snoozed_until : r.remind_at;
-      const rec = r.recurrence ? ` (recurring: ${r.recurrence})` : '';
-      return `${icon} **${r.title}** — ${time}${rec}\n   ID: \`${r.id}\``;
-    });
-    return { content: [{ type: 'text' as const, text: lines.join('\n\n') }] };
   },
 );
 

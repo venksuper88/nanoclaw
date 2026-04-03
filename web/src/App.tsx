@@ -23,6 +23,7 @@ export interface Group {
   hasSession: boolean;
   showInSidebar: boolean;
   model: string;
+  contextWindow: string;
 }
 
 export interface Status {
@@ -301,6 +302,29 @@ export function App() {
             {(g.hasSession || processingFolders.has(g.folder)) && <div className="agent-dot" />}
           </div>
         ))}
+
+        {/* Sub-Apps */}
+        <div className="drawer-section-title">Apps</div>
+        <a href="/finance/" className="agent-card" style={{ textDecoration: 'none', color: 'inherit' }}>
+          <div className="agent-avatar" style={{ background: 'var(--green)' }}>
+            <span className="mi" style={{ fontSize: 22 }}>account_balance</span>
+          </div>
+          <div className="agent-info">
+            <div className="agent-name">Finance</div>
+            <div className="agent-status">Rail Master P&L</div>
+          </div>
+          <span className="mi" style={{ fontSize: 16, color: 'var(--text3)' }}>open_in_new</span>
+        </a>
+        <a href="/creatives/" className="agent-card" style={{ textDecoration: 'none', color: 'inherit' }}>
+          <div className="agent-avatar" style={{ background: 'var(--purple)' }}>
+            <span className="mi" style={{ fontSize: 22 }}>palette</span>
+          </div>
+          <div className="agent-info">
+            <div className="agent-name">Static Studio</div>
+            <div className="agent-status">Creative Assets</div>
+          </div>
+          <span className="mi" style={{ fontSize: 16, color: 'var(--text3)' }}>open_in_new</span>
+        </a>
       </div>
 
       {/* Main content */}

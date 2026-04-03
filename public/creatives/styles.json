@@ -1,0 +1,25 @@
+{
+  "goldenHeadline": {
+    "fontFamily": "'Noto Sans', sans-serif",
+    "fontWeight": "900",
+    "fontSize": "72px",
+    "background": "linear-gradient(to bottom, #FFF8CC 0%, #FFE066 25%, #ffb007 55%, #ff8e07 100%)",
+    "WebkitBackgroundClip": "text",
+    "WebkitTextFillColor": "transparent",
+    "backgroundClip": "text",
+    "textTransform": "uppercase",
+    "textAlign": "center",
+    "lineHeight": "1.08",
+    "WebkitTextstroke": "F57C00",
+    "filter": "drop-shadow(0 8px 0 #5A2E00) drop-shadow(0 8px 12px rgba(0,0,0,0.8))"
+  },
+  "whiteButtonText": {
+    "fontFamily": "'Noto Sans', sans-serif",
+    "fontWeight": "900",
+    "fontSize": "48px",
+    "color": "#ffffff",
+    "whiteSpace": "nowrap",
+    "textAlign": "center",
+    "textShadow": "0 3px 6px rgba(0,0,0,0.3)"
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "id": "template_1775041946761",
+  "name": "TestTemplateC",
+  "canvas": {
+    "width": 1200,
+    "height": 1200
+  },
+  "zones": [
+    {
+      "id": "zone_1",
+      "type": "image",
+      "label": "BG",
+      "position": {},
+      "size": {
+        "width": "100%",
+        "height": "100%"
+      }
+    },
+    {
+      "id": "zone_2",
+      "type": "text",
+      "label": "Title",
+      "position": {
+        "top": "20%"
+      },
+      "size": {
+        "width": 1100,
+        "height": 400
+      },
+      "defaultText": "Text here",
+      "style": "goldenHeadline"
+    },
+    {
+      "id": "zone_3",
+      "type": "button",
+      "label": "CTA",
+      "position": {
+        "bottom": "8%"
+      },
+      "size": {
+        "width": 500,
+        "height": 200
+      },
+      "defaultText": "Text here",
+      "style": "whiteButtonText",
+      "textFill": 85
+    },
+    {
+      "id": "zone_4",
+      "type": "image",
+      "label": "Logo",
+      "position": {
+        "top": "5%"
+      },
+      "size": {
+        "width": 400,
+        "height": 200
+      }
+    }
+  ]
+}

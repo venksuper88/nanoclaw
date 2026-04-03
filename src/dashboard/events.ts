@@ -28,6 +28,14 @@ export interface DashboardEventMap {
   'draft:update': { chatJid: string; content: string };
   'task:complete': { taskId: string; status: string; duration: number };
   'context:update': { groupFolder: string; percent: number; sizeKB: number };
+  'agent:stuck': { groupName: string; groupFolder: string; elapsedMs: number };
+  'agent:alert': {
+    groupName: string;
+    groupFolder: string;
+    type: 'slow_response' | 'high_turns' | 'high_context' | 'high_cost';
+    message: string;
+    timestamp: string;
+  };
 }
 
 class DashboardEventHub extends EventEmitter {
@@ -42,4 +50,7 @@ class DashboardEventHub extends EventEmitter {
 export const dashboardEvents = new DashboardEventHub();
 
 // In-memory context usage cache (populated from stream-json usage after each turn)
-export const contextCache: Record<string, { percent: number; sizeKB: number; tokens: number }> = {};
+export const contextCache: Record<
+  string,
+  { percent: number; sizeKB: number; tokens: number }
+> = {};

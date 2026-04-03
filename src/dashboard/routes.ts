@@ -41,9 +41,21 @@ import {
   getRouterState,
   setRouterState,
   getTokenUsageSummary,
+  createEmailRule,
+  getEmailRules,
+  updateEmailRule,
+  deleteEmailRule,
+  getEmailLog,
+  getAlerts,
+  dismissAlert,
 } from '../db.js';
-import { getTenjinSnapshot, fetchAndStoreTenjinSnapshot, getAllTenjinSnapshots } from '../tenjin-snapshot.js';
+import {
+  getTenjinSnapshot,
+  fetchAndStoreTenjinSnapshot,
+  getAllTenjinSnapshots,
+} from '../tenjin-snapshot.js';
 import { ASSISTANT_NAME, GROUPS_DIR } from '../config.js';
+import { listCommands } from '../commands.js';
 import { dashboardEvents, contextCache } from './events.js';
 import {
   resolveGroupFolderPath,
@@ -52,17 +64,19 @@ import {
 import { formatMessages, compressImageForAgent } from '../router.js';
 import { logger } from '../logger.js';
 import { randomUUID } from 'crypto';
-import { savePushSubscription, deletePushSubscription } from '../db.js';
+import { savePushSubscription, deletePushSubscription, getDbClient } from '../db.js';
 import { VAPID_PUBLIC_KEY } from '../config.js';
 import { getTranscriptSize, getSessionTranscriptSize } from '../tmux-runner.js';
-import { getGroupUserIds } from '../types.js';
 
 /**
  * Compute next due date for a recurring todo.
  * Presets: daily, weekday, weekly, monthly, yearly.
  * Monthly handles short months by clamping to last day of month.
  */
-function computeNextDueDate(fromIso: string, recurrence: string): string | null {
+function computeNextDueDate(
+  fromIso: string,
+  recurrence: string,
+): string | null {
   const from = new Date(fromIso);
   if (isNaN(from.getTime())) return null;
 
@@ -138,6 +152,7 @@ export type ChatSendFn = (
   chatJid: string,
   text: string,
   senderName: string,
+  stateless?: boolean,
 ) => Promise<void>;
 
 /**
@@ -149,6 +164,7 @@ import type { MemoryService } from '../memory.js';
 
 let chatSendFn: ChatSendFn | null = null;
 let sessionKillFn: SessionKillFn | null = null;
+let sessionInterruptFn: ((chatJid: string) => void) | null = null;
 let memoryServiceRef: MemoryService | null = null;
 let activeGroupsFn: (() => string[]) | null = null;
 
@@ -158,6 +174,10 @@ export function setChatSendFn(fn: ChatSendFn): void {
 
 export function setSessionKillFn(fn: SessionKillFn): void {
   sessionKillFn = fn;
+}
+
+export function setSessionInterruptFn(fn: (chatJid: string) => void): void {
+  sessionInterruptFn = fn;
 }
 
 export function setMemoryService(svc: MemoryService): void {
@@ -172,7 +192,7 @@ function getUser(req: Request): TokenUser {
   return (req as any).tokenUser as TokenUser;
 }
 
-export function createRouter(): Router {
+export async function createRouter(): Promise<Router> {
   const router = Router();
 
   // ── Current user info ──
@@ -306,7 +326,7 @@ export function createRouter(): Router {
   // ── Chat: send message to a group ──
   router.post('/api/chat/send', async (req: Request, res: Response) => {
     const user = getUser(req);
-    const { chatJid, text } = req.body;
+    const { chatJid, text, stateless } = req.body;
     if (!chatJid || !text) {
       res.status(400).json({ ok: false, error: 'chatJid and text required' });
       return;
@@ -333,8 +353,50 @@ export function createRouter(): Router {
       return;
     }
 
+    // Handle ! commands — execute directly without LLM
+    if (typeof text === 'string' && text.startsWith('!')) {
+      const parts = text.slice(1).trim().split(/\s+/);
+      const commandName = parts[0];
+      const group = groups[chatJid];
+      if (commandName && group) {
+        const { runCommand: execCommand, resolveCommand: resolveCmd } = await import('../commands.js');
+        if (resolveCmd(commandName, group.folder)) {
+          // Store the user's command message in DB for chat history
+          storeMessage({
+            id: `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            chat_jid: chatJid,
+            sender: user.name,
+            sender_name: user.name,
+            content: text,
+            timestamp: new Date().toISOString(),
+            is_from_me: true,
+          }).catch(() => {});
+
+          const sendMsg = async (msg: string) => {
+            const agentName = group.name || ASSISTANT_NAME;
+            const msgId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+            const timestamp = new Date().toISOString();
+            storeMessage({ id: msgId, chat_jid: chatJid, sender: agentName, sender_name: agentName, content: msg, timestamp, is_from_me: false, is_bot_message: true }).catch(() => {});
+            dashboardEvents.emitEvent('message:new', { chatJid, sender: agentName, senderName: agentName, content: msg, timestamp, isFromMe: false });
+          };
+
+          // Run in background — don't block the response
+          execCommand({
+            commandName,
+            groupFolder: group.folder,
+            chatJid,
+            input: { args: parts.slice(1).join(' '), sender: user.name },
+            sendMessage: sendMsg,
+          }).catch((err) => logger.warn({ err, commandName }, 'Dashboard command execution failed'));
+
+          res.json({ ok: true });
+          return;
+        }
+      }
+    }
+
     // Use the token user's name as the sender
-    await chatSendFn(chatJid, text, user.name);
+    await chatSendFn(chatJid, text, user.name, !!stateless);
     res.json({ ok: true });
   });
 
@@ -344,8 +406,13 @@ export function createRouter(): Router {
     (req: Request, res: Response, next) => {
       upload.single('file')(req, res, (err) => {
         if (err) {
-          logger.error({ err, folder: req.params.folder }, 'File upload multer error');
-          res.status(400).json({ ok: false, error: `Upload failed: ${err.message}` });
+          logger.error(
+            { err, folder: req.params.folder },
+            'File upload multer error',
+          );
+          res
+            .status(400)
+            .json({ ok: false, error: `Upload failed: ${err.message}` });
           return;
         }
         next();
@@ -359,19 +426,30 @@ export function createRouter(): Router {
 
       // Verify file was written to disk
       if (!fs.existsSync(req.file.path)) {
-        logger.error({ path: req.file.path }, 'Uploaded file not found on disk after multer');
+        logger.error(
+          { path: req.file.path },
+          'Uploaded file not found on disk after multer',
+        );
         res.status(500).json({ ok: false, error: 'File write failed' });
         return;
       }
 
       logger.info(
-        { folder: req.params.folder as string, file: req.file.originalname, size: req.file.size, path: req.file.path },
+        {
+          folder: req.params.folder as string,
+          file: req.file.originalname,
+          size: req.file.size,
+          path: req.file.path,
+        },
         'File uploaded via dashboard',
       );
 
       // Pre-generate agent thumbnail for images (non-blocking)
       compressImageForAgent(req.file.path).catch((err) =>
-        logger.warn({ err, file: req.file!.originalname }, 'Thumbnail pre-generation failed'),
+        logger.warn(
+          { err, file: req.file!.originalname },
+          'Thumbnail pre-generation failed',
+        ),
       );
 
       res.json({
@@ -417,23 +495,42 @@ export function createRouter(): Router {
     res.json({ ok: true });
   });
 
+  // Interrupt (Ctrl+C) the running agent — stops current turn, preserves session
+  router.post('/api/sessions/:jid/interrupt', (req: Request, res: Response) => {
+    const jid = decodeURIComponent(req.params.jid as string);
+    if (!sessionInterruptFn) {
+      res.status(503).json({ ok: false, error: 'Interrupt not available' });
+      return;
+    }
+    sessionInterruptFn(jid);
+    res.json({ ok: true });
+  });
+
   // ── Tasks ──
   router.get('/api/tasks', async (req: Request, res: Response) => {
     const user = getUser(req);
     const tasks = await getAllTasks();
-    const filtered = tasks.filter(t => user.isOwner || canAccessGroup(user, t.chat_jid));
+    const filtered = tasks.filter(
+      (t) => user.isOwner || canAccessGroup(user, t.chat_jid),
+    );
     res.json({ ok: true, data: filtered });
   });
 
   router.get('/api/tasks/:id', async (req: Request, res: Response) => {
     const task = await getTaskById(req.params.id as string);
-    if (!task) { res.status(404).json({ ok: false, error: 'Task not found' }); return; }
+    if (!task) {
+      res.status(404).json({ ok: false, error: 'Task not found' });
+      return;
+    }
     res.json({ ok: true, data: task });
   });
 
   router.get('/api/tasks/:id/logs', async (req: Request, res: Response) => {
     const task = await getTaskById(req.params.id as string);
-    if (!task) { res.status(404).json({ ok: false, error: 'Task not found' }); return; }
+    if (!task) {
+      res.status(404).json({ ok: false, error: 'Task not found' });
+      return;
+    }
     const limit = parseInt(req.query.limit as string) || 20;
     const logs = await getTaskRunLogs(req.params.id as string, limit);
     res.json({ ok: true, data: logs });
@@ -441,14 +538,23 @@ export function createRouter(): Router {
 
   router.post('/api/tasks/:id/pause', async (req: Request, res: Response) => {
     const task = await getTaskById(req.params.id as string);
-    if (!task) { res.status(404).json({ ok: false, error: 'Task not found' }); return; }
+    if (!task) {
+      res.status(404).json({ ok: false, error: 'Task not found' });
+      return;
+    }
     await updateTask(req.params.id as string, { status: 'paused' });
-    res.json({ ok: true, data: { id: req.params.id as string, status: 'paused' } });
+    res.json({
+      ok: true,
+      data: { id: req.params.id as string, status: 'paused' },
+    });
   });
 
   router.post('/api/tasks/:id/resume', async (req: Request, res: Response) => {
     const task = await getTaskById(req.params.id as string);
-    if (!task) { res.status(404).json({ ok: false, error: 'Task not found' }); return; }
+    if (!task) {
+      res.status(404).json({ ok: false, error: 'Task not found' });
+      return;
+    }
     await updateTask(req.params.id as string, { status: 'active' });
     res.json({
       ok: true,
@@ -458,7 +564,10 @@ export function createRouter(): Router {
 
   router.delete('/api/tasks/:id', async (req: Request, res: Response) => {
     const task = await getTaskById(req.params.id as string);
-    if (!task) { res.status(404).json({ ok: false, error: 'Task not found' }); return; }
+    if (!task) {
+      res.status(404).json({ ok: false, error: 'Task not found' });
+      return;
+    }
     await deleteTask(req.params.id as string);
     res.json({ ok: true });
   });
@@ -467,25 +576,35 @@ export function createRouter(): Router {
   router.get('/api/todos', async (req: Request, res: Response) => {
     const user = getUser(req);
     const todos = await getAllTodos();
-    const groups = await getAllRegisteredGroups();
-    const userIds = new Set(
-      Object.entries(groups)
-        .filter(([jid]) => user.isOwner || canAccessGroup(user, jid))
-        .flatMap(([, g]) => getGroupUserIds(g.memoryUserId)),
-    );
-    const filtered = todos.filter((t) => userIds.has(t.user_id));
+    const userId = user.name.toLowerCase();
+    const filtered = todos.filter((t) => t.user_id === userId);
     res.json({ ok: true, data: filtered });
   });
 
   router.post('/api/todos', async (req: Request, res: Response) => {
-    const { title, data, priority, due_date, remind_at, recurrence, user_id } = req.body;
-    if (!title) { res.status(400).json({ ok: false, error: 'title required' }); return; }
+    const user = getUser(req);
+    const { title, data, priority, due_date, remind_at, recurrence, user_id } =
+      req.body;
+    if (!title) {
+      res.status(400).json({ ok: false, error: 'title required' });
+      return;
+    }
     const id = `todo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const now = new Date().toISOString();
     await createTodo({
-      id, user_id: user_id || 'venky', title, data: data || null, status: 'pending',
-      priority: priority || 'medium', due_date: due_date || null, remind_at: remind_at || null,
-      recurrence: recurrence || null, reminder_fired_at: null, created_by: 'dashboard', created_at: now, updated_at: now,
+      id,
+      user_id: user_id || user.name.toLowerCase(),
+      title,
+      data: data || null,
+      status: 'pending',
+      priority: priority || 'medium',
+      due_date: due_date || null,
+      remind_at: remind_at || null,
+      recurrence: recurrence || null,
+      reminder_fired_at: null,
+      created_by: 'dashboard',
+      created_at: now,
+      updated_at: now,
     });
     const todo = await getTodoById(id);
     res.json({ ok: true, data: todo });
@@ -493,20 +612,29 @@ export function createRouter(): Router {
 
   router.patch('/api/todos/:id', async (req: Request, res: Response) => {
     const todo = await getTodoById(req.params.id as string);
-    if (!todo) { res.status(404).json({ ok: false, error: 'Not found' }); return; }
+    if (!todo) {
+      res.status(404).json({ ok: false, error: 'Not found' });
+      return;
+    }
 
     // Handle recurring todo completion — reset with next due date instead of marking done
     if (req.body.status === 'done' && todo.recurrence) {
-      const nextDue = computeNextDueDate(todo.due_date || new Date().toISOString(), todo.recurrence);
+      const nextDue = computeNextDueDate(
+        todo.due_date || new Date().toISOString(),
+        todo.recurrence,
+      );
       if (nextDue) {
         const nextRemind = todo.remind_at
           ? computeNextDueDate(todo.remind_at, todo.recurrence)
           : null;
-        await updateTodo(req.params.id as string, {
-          due_date: nextDue,
-          remind_at: nextRemind,
-          reminder_fired_at: null,
-        } as any);
+        await updateTodo(
+          req.params.id as string,
+          {
+            due_date: nextDue,
+            remind_at: nextRemind,
+            reminder_fired_at: null,
+          } as any,
+        );
         const updated = await getTodoById(req.params.id as string);
         res.json({ ok: true, data: updated });
         return;
@@ -520,19 +648,30 @@ export function createRouter(): Router {
 
   router.delete('/api/todos/:id', async (req: Request, res: Response) => {
     const todo = await getTodoById(req.params.id as string);
-    if (!todo) { res.status(404).json({ ok: false, error: 'Not found' }); return; }
+    if (!todo) {
+      res.status(404).json({ ok: false, error: 'Not found' });
+      return;
+    }
     await deleteTodo(req.params.id as string);
     res.json({ ok: true });
   });
 
   // ── Token reminder group ──
-  router.patch('/api/tokens/:token/reminder-group', async (req: Request, res: Response) => {
-    const user = getUser(req);
-    if (!user.isOwner) { res.status(403).json({ ok: false, error: 'Owner access required' }); return; }
-    const { reminderGroupJid } = req.body;
-    await updateDashboardToken(req.params.token as string, { reminder_group_jid: reminderGroupJid || null });
-    res.json({ ok: true });
-  });
+  router.patch(
+    '/api/tokens/:token/reminder-group',
+    async (req: Request, res: Response) => {
+      const user = getUser(req);
+      if (!user.isOwner) {
+        res.status(403).json({ ok: false, error: 'Owner access required' });
+        return;
+      }
+      const { reminderGroupJid } = req.body;
+      await updateDashboardToken(req.params.token as string, {
+        reminder_group_jid: reminderGroupJid || null,
+      });
+      res.json({ ok: true });
+    },
+  );
 
   // ── Logs ──
   router.get('/api/logs/:folder', (req: Request, res: Response) => {
@@ -586,20 +725,31 @@ export function createRouter(): Router {
           try {
             const dbVal = await getRouterState(`context_pct:${group.folder}`);
             if (dbVal) contextPercent = JSON.parse(dbVal).percent ?? 0;
-          } catch { /* ignore */ }
+          } catch {
+            /* ignore */
+          }
         }
 
         // Calculate attachment folder size
         let attachmentSize = 0;
         try {
-          const attachDir = path.join(resolveGroupFolderPath(group.folder), 'attachments');
+          const attachDir = path.join(
+            resolveGroupFolderPath(group.folder),
+            'attachments',
+          );
           if (fs.existsSync(attachDir)) {
             for (const f of fs.readdirSync(attachDir)) {
               if (f.startsWith('.')) continue;
-              try { attachmentSize += fs.statSync(path.join(attachDir, f)).size; } catch { /* skip */ }
+              try {
+                attachmentSize += fs.statSync(path.join(attachDir, f)).size;
+              } catch {
+                /* skip */
+              }
             }
           }
-        } catch { /* dir doesn't exist */ }
+        } catch {
+          /* dir doesn't exist */
+        }
 
         return {
           jid,
@@ -612,7 +762,9 @@ export function createRouter(): Router {
           hasSession: !!sessionId,
           lastActivity: chat?.last_message_time,
           transcriptSize: getTranscriptSize(group.folder, group.workDir),
-          currentTranscriptSize: sessionId ? getSessionTranscriptSize(group.folder, sessionId, group.workDir) : 0,
+          currentTranscriptSize: sessionId
+            ? getSessionTranscriptSize(group.folder, sessionId, group.workDir)
+            : 0,
           contextPercent,
           attachmentSize,
         };
@@ -634,7 +786,12 @@ export function createRouter(): Router {
   // ── Claude Plan Usage (from Chrome extension relay) ──
   router.post('/api/claude-usage', async (req: Request, res: Response) => {
     const { session, weeklyAll, weeklySonnet, scrapedAt } = req.body;
-    const data = JSON.stringify({ session, weeklyAll, weeklySonnet, scrapedAt });
+    const data = JSON.stringify({
+      session,
+      weeklyAll,
+      weeklySonnet,
+      scrapedAt,
+    });
     await setRouterState('claude_usage', data);
     logger.info({ scrapedAt }, 'Claude usage data received from extension');
     res.json({ ok: true });
@@ -653,7 +810,9 @@ export function createRouter(): Router {
   router.get('/api/token-usage', async (req: Request, res: Response) => {
     const days = req.query.days ? Number(req.query.days) : undefined;
     const folder = req.query.folder as string | undefined;
-    const summary = await getTokenUsageSummary(folder, days);
+    const since = req.query.since as string | undefined;
+    const until = req.query.until as string | undefined;
+    const summary = await getTokenUsageSummary(folder, days, since, until);
     res.json({ ok: true, data: summary });
   });
 
@@ -730,7 +889,9 @@ export function createRouter(): Router {
                 cached = JSON.parse(dbVal);
                 contextCache[group.folder] = cached!;
               }
-            } catch { /* ignore */ }
+            } catch {
+              /* ignore */
+            }
           }
           res.json({ ok: true, data: cached || empty });
           return;
@@ -851,14 +1012,21 @@ export function createRouter(): Router {
         updated.idleTimeoutMinutes = idleTimeoutMinutes;
       if (allowedSkills !== undefined) updated.allowedSkills = allowedSkills;
       const allowedMcpServers = req.body.allowedMcpServers;
-      if (allowedMcpServers !== undefined) updated.allowedMcpServers = allowedMcpServers;
-      if (mode !== undefined && mode === 'tmux')
-        updated.mode = mode;
-      if (requiresTrigger !== undefined) updated.requiresTrigger = requiresTrigger;
-      if (req.body.workDir !== undefined) updated.workDir = req.body.workDir || undefined;
-      if (model !== undefined && (model === 'opus' || model === 'sonnet')) updated.model = model;
+      if (allowedMcpServers !== undefined)
+        updated.allowedMcpServers = allowedMcpServers;
+      if (mode !== undefined && mode === 'tmux') updated.mode = mode;
+      if (requiresTrigger !== undefined)
+        updated.requiresTrigger = requiresTrigger;
+      if (req.body.workDir !== undefined)
+        updated.workDir = req.body.workDir || undefined;
+      if (model !== undefined && (model === 'opus' || model === 'sonnet'))
+        updated.model = model;
       const contextWindow = req.body.contextWindow;
-      if (contextWindow !== undefined && (contextWindow === '200k' || contextWindow === '1m')) updated.contextWindow = contextWindow;
+      if (
+        contextWindow !== undefined &&
+        (contextWindow === '200k' || contextWindow === '1m')
+      )
+        updated.contextWindow = contextWindow;
 
       await setRegisteredGroup(jid, updated);
       res.json({
@@ -1134,7 +1302,10 @@ export function createRouter(): Router {
         filepath,
       );
       if (!fs.existsSync(fullPath)) {
-        logger.warn({ folder, filepath, fullPath }, 'File not found when serving');
+        logger.warn(
+          { folder, filepath, fullPath },
+          'File not found when serving',
+        );
         res.status(404).json({ ok: false, error: 'File not found' });
         return;
       }
@@ -1182,8 +1353,9 @@ export function createRouter(): Router {
   });
 
   // ── Commands (for chat autocomplete) ──
-  router.get('/api/commands', (_req: Request, res: Response) => {
-    const commands: Array<{ command: string; description: string }> = [
+  router.get('/api/commands', (req: Request, res: Response) => {
+    const groupFolder = req.query.folder as string | undefined;
+    const commands: Array<{ command: string; description: string; prefix?: string }> = [
       {
         command: 'new',
         description: 'Clear context and start a fresh session',
@@ -1215,25 +1387,191 @@ export function createRouter(): Router {
         }
       }
     }
+    // Add ! commands (scripts) scoped to the group
+    if (groupFolder) {
+      const groupCommands = listCommands(groupFolder);
+      for (const cmd of groupCommands) {
+        commands.push({
+          command: cmd.name,
+          description: cmd.description,
+          prefix: '!',
+        });
+      }
+    }
+
     res.json({ ok: true, data: commands });
   });
 
-  // ── MCP Servers (from ~/.claude.json) ──
-  router.get('/api/mcp-servers', (_req: Request, res: Response) => {
+  // ── MCP Servers (from ~/.claude.json + .mcp.json in group workDirs) ──
+  router.get('/api/mcp-servers', async (_req: Request, res: Response) => {
     const homeClaudeJson = path.join(os.homedir(), '.claude.json');
-    const servers: Array<{ name: string; type: string }> = [];
+    const seen = new Set<string>();
+    const servers: Array<{ name: string; type: string; source: string }> = [];
+    const addServer = (name: string, config: any, source: string) => {
+      if (name === 'nanoclaw' || seen.has(name)) return;
+      seen.add(name);
+      const type = config?.type === 'http' ? 'http' : 'stdio';
+      servers.push({ name, type, source });
+    };
     try {
+      // Global MCP servers: mcp-servers.json (stable) + ~/.claude.json (volatile)
+      const mcpConfigPath = path.join(process.cwd(), 'mcp-servers.json');
+      if (fs.existsSync(mcpConfigPath)) {
+        try {
+          const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf-8'));
+          for (const [name, config] of Object.entries(mcpConfig.mcpServers || {})) {
+            addServer(name, config, 'global');
+          }
+        } catch {}
+      }
       if (fs.existsSync(homeClaudeJson)) {
         const parsed = JSON.parse(fs.readFileSync(homeClaudeJson, 'utf-8'));
-        const mcps = parsed.mcpServers || {};
-        for (const [name, config] of Object.entries(mcps)) {
-          if (name === 'nanoclaw') continue; // always included, not toggleable
-          const type = (config as any).type === 'http' ? 'http' : 'stdio';
-          servers.push({ name, type });
+        for (const [name, config] of Object.entries(parsed.mcpServers || {})) {
+          addServer(name, config, 'global');
+        }
+      }
+      // Project-scoped MCP servers from .mcp.json in group workDirs
+      const groups = await getAllRegisteredGroups();
+      const scannedDirs = new Set<string>();
+      for (const group of Object.values(groups)) {
+        if (!group.workDir) continue;
+        const resolvedDir = path.resolve(group.workDir);
+        if (scannedDirs.has(resolvedDir)) continue;
+        scannedDirs.add(resolvedDir);
+        const mcpJson = path.join(resolvedDir, '.mcp.json');
+        if (fs.existsSync(mcpJson)) {
+          try {
+            const parsed = JSON.parse(fs.readFileSync(mcpJson, 'utf-8'));
+            for (const [name, config] of Object.entries(parsed.mcpServers || {})) {
+              addServer(name, config, resolvedDir);
+            }
+          } catch {}
         }
       }
     } catch {}
     res.json({ ok: true, data: servers });
+  });
+
+  // ── Email Rules ──
+  router.get('/api/email-rules', async (_req: Request, res: Response) => {
+    try {
+      const rules = await getEmailRules();
+      res.json({ ok: true, data: rules });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: 'Failed to load email rules' });
+    }
+  });
+
+  router.post('/api/email-rules', async (req: Request, res: Response) => {
+    try {
+      const { name, priority, from_pattern, subject_pattern, body_pattern, action, target_group, command_name, extract_prompt, enabled } = req.body;
+      if (!name) return res.status(400).json({ ok: false, error: 'Name is required' });
+      const rule = await createEmailRule({
+        name,
+        priority: priority ?? 0,
+        from_pattern: from_pattern || '',
+        subject_pattern: subject_pattern || '',
+        body_pattern: body_pattern || '',
+        action: action || 'forward',
+        target_group: target_group || '',
+        command_name: command_name || '',
+        extract_prompt: extract_prompt || '',
+        enabled: enabled !== false,
+      });
+      res.json({ ok: true, data: rule });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: 'Failed to create email rule' });
+    }
+  });
+
+  router.put('/api/email-rules/:id', async (req: Request, res: Response) => {
+    try {
+      const id = req.params.id as string;
+      const updates = req.body;
+      delete updates.id;
+      delete updates.created_at;
+      delete updates.updated_at;
+      await updateEmailRule(id, updates);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: 'Failed to update email rule' });
+    }
+  });
+
+  router.delete('/api/email-rules/:id', async (req: Request, res: Response) => {
+    try {
+      await deleteEmailRule(req.params.id as string);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: 'Failed to delete email rule' });
+    }
+  });
+
+  // ── Email Log ──
+  router.get('/api/email-log', async (req: Request, res: Response) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 50;
+      const offset = parseInt(req.query.offset as string) || 0;
+      const log = await getEmailLog(limit, offset);
+      res.json({ ok: true, data: log });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: 'Failed to load email log' });
+    }
+  });
+
+  // ── Extraction Stats (computed from email_log) ──
+  router.get('/api/extraction-stats', async (_req: Request, res: Response) => {
+    try {
+      const log = await getEmailLog(10000, 0);
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+      const weekStart = new Date(now.getTime() - 7 * 86400000).toISOString();
+
+      const stats = {
+        today: { calls: 0, input_tokens: 0, output_tokens: 0 },
+        week: { calls: 0, input_tokens: 0, output_tokens: 0 },
+        total: { calls: log.length, input_tokens: 0, output_tokens: 0 },
+        byType: { email: log.length } as Record<string, number>,
+      };
+
+      for (const entry of log) {
+        stats.total.input_tokens += entry.input_tokens;
+        stats.total.output_tokens += entry.output_tokens;
+        if (entry.processed_at >= todayStart) {
+          stats.today.calls++;
+          stats.today.input_tokens += entry.input_tokens;
+          stats.today.output_tokens += entry.output_tokens;
+        }
+        if (entry.processed_at >= weekStart) {
+          stats.week.calls++;
+          stats.week.input_tokens += entry.input_tokens;
+          stats.week.output_tokens += entry.output_tokens;
+        }
+      }
+
+      res.json({ ok: true, data: stats });
+    } catch {
+      res.json({ ok: true, data: { today: { calls: 0, input_tokens: 0, output_tokens: 0 }, week: { calls: 0, input_tokens: 0, output_tokens: 0 }, total: { calls: 0, input_tokens: 0, output_tokens: 0 }, byType: {} } });
+    }
+  });
+
+  // ── Agent Alerts ──
+  router.get('/api/alerts', async (_req: Request, res: Response) => {
+    try {
+      const alerts = await getAlerts();
+      res.json({ ok: true, data: alerts });
+    } catch {
+      res.json({ ok: true, data: [] });
+    }
+  });
+
+  router.post('/api/alerts/:id/dismiss', async (req: Request, res: Response) => {
+    try {
+      await dismissAlert(Number(req.params.id as string));
+      res.json({ ok: true, data: null });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: String(err) });
+    }
   });
 
   // ── Skills ──
@@ -1333,79 +1671,26 @@ export function createRouter(): Router {
     },
   );
 
-  // Tenjin monthly snapshot — GET reads from DB, POST fetches fresh from Tenjin + stores
-  router.get('/api/finance/tenjin-snapshots', async (_req: Request, res: Response) => {
-    try { res.json(await getAllTenjinSnapshots()); }
-    catch (e) { res.status(500).json({ error: String(e) }); }
-  });
-
-  router.get('/api/finance/tenjin-snapshot', async (req: Request, res: Response) => {
-    const month = String(req.query.month || '');
-    if (!month.match(/^\d{4}-\d{2}$/)) { res.status(400).json({ error: 'month required (YYYY-MM)' }); return; }
-    try {
-      const snap = await getTenjinSnapshot(month);
-      if (!snap) { res.status(404).json({ error: 'No snapshot for this month' }); return; }
-      res.json(snap);
-    } catch (e) { res.status(500).json({ error: String(e) }); }
-  });
-
-  router.post('/api/finance/tenjin-snapshot', async (req: Request, res: Response) => {
-    const month = String(req.body?.month || req.query.month || '');
-    if (!month.match(/^\d{4}-\d{2}$/)) { res.status(400).json({ error: 'month required (YYYY-MM)' }); return; }
-    try {
-      const snap = await fetchAndStoreTenjinSnapshot(month);
-      res.json(snap);
-    } catch (e) { res.status(500).json({ error: String(e) }); }
-  });
-
-  // Finance data endpoint
-  router.get('/api/finance/data', (req: Request, res: Response) => {
-    const dataPath = path.join(process.cwd(), 'groups', 'dashboard_po', 'attachments', 'pl_data.json');
-    if (!fs.existsSync(dataPath)) { res.status(404).json({ error: 'Data not available' }); return; }
-
-    const data = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
-
-    // Dynamically inject current month if missing
-    const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-    const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const curLabel = `${MON[now.getMonth()]}-${String(now.getFullYear()).slice(2)}*`;
-    const months: string[] = data.months || [];
-
-    // Remove asterisk from any non-current month entries
-    const fixedMonths = months.map((m: string) => {
-      const cleaned = m.replace('*', '');
-      const [mon, yr] = cleaned.split('-');
-      const mIdx = MON.indexOf(mon);
-      if (mIdx < 0 || !yr) return m;
-      const mYear = 2000 + parseInt(yr);
-      const isCurrent = mIdx === now.getMonth() && mYear === now.getFullYear();
-      return isCurrent ? `${cleaned}*` : cleaned;
-    });
-
-    const alreadyHasCurrent = fixedMonths.some((m: string) => m.endsWith('*'));
-    if (!alreadyHasCurrent) {
-      fixedMonths.push(curLabel);
-      // Append zero to every numeric array in the data structure
-      const appendZero = (obj: any) => {
-        if (!obj || typeof obj !== 'object') return;
-        for (const key of Object.keys(obj)) {
-          if (Array.isArray(obj[key]) && obj[key].length > 0 && typeof obj[key][0] === 'number') {
-            obj[key].push(0);
-          } else if (Array.isArray(obj[key]) && obj[key].length > 0 && typeof obj[key][0] === 'boolean') {
-            obj[key].push(false);
-          } else if (Array.isArray(obj[key]) && obj[key].length > 0 && obj[key][0] === null) {
-            obj[key].push(null);
-          } else {
-            appendZero(obj[key]);
-          }
-        }
-      };
-      appendZero(data);
+  // ── Finance sub-app routes (loaded from ~/Projects/deven-finance/) ─────────
+  try {
+    const financePath = path.resolve(os.homedir(), 'Projects', 'deven-finance', 'dist', 'api', 'index.js');
+    if (fs.existsSync(financePath)) {
+      const { createFinanceRouter } = await import(financePath);
+      const financeRouter = createFinanceRouter({
+        Router,
+        getDbClient,
+        getAllTenjinSnapshots,
+        getTenjinSnapshot,
+        fetchAndStoreTenjinSnapshot,
+      });
+      router.use('/api/finance', financeRouter);
+      logger.info('Finance sub-app routes loaded from deven-finance');
+    } else {
+      logger.warn({ financePath }, 'Finance sub-app not found, finance routes disabled');
     }
-
-    data.months = fixedMonths;
-    res.json(data);
-  });
+  } catch (err) {
+    logger.error({ err }, 'Failed to load finance sub-app routes');
+  }
 
   return router;
 }

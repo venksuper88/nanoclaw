@@ -1,0 +1,24 @@
+{
+  "id": "template_1775040755781",
+  "name": "TestTemplateB",
+  "canvas": {
+    "width": 1200,
+    "height": 1200
+  },
+  "zones": [
+    {
+      "id": "zone_1775040771010",
+      "type": "text",
+      "label": "Title",
+      "position": {
+        "top": "10%"
+      },
+      "size": {
+        "width": 400,
+        "height": 200
+      },
+      "defaultText": "Text here",
+      "style": "goldenHeadline"
+    }
+  ]
+}

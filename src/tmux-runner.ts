@@ -124,7 +124,11 @@ export function transcriptDir(folder: string, workDir?: string): string {
  * Check if the active session's transcript exceeds the size limit.
  * Returns true if the session should be skipped (start fresh).
  */
-function isTranscriptOversized(folder: string, sessionId: string, workDir?: string): boolean {
+function isTranscriptOversized(
+  folder: string,
+  sessionId: string,
+  workDir?: string,
+): boolean {
   const dir = transcriptDir(folder, workDir);
   const file = path.join(dir, `${sessionId}.jsonl`);
   try {
@@ -176,7 +180,11 @@ function cleanOldTranscripts(folder: string, workDir?: string): void {
 /**
  * Get the size of the current session's transcript file (in bytes).
  */
-export function getSessionTranscriptSize(folder: string, sessionId: string, workDir?: string): number {
+export function getSessionTranscriptSize(
+  folder: string,
+  sessionId: string,
+  workDir?: string,
+): number {
   const dir = transcriptDir(folder, workDir);
   const file = path.join(dir, `${sessionId}.jsonl`);
   try {
@@ -269,10 +277,31 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
   if (fs.existsSync(homeClaudeJson)) {
     try {
       homeClaudeParsed = JSON.parse(fs.readFileSync(homeClaudeJson, 'utf-8'));
-      const globalMcps = homeClaudeParsed.mcpServers || {};
+      // Collect global MCP servers: mcp-servers.json (stable) + ~/.claude.json (volatile)
+      const allMcps: Record<string, any> = {};
+      const mcpConfigPath = path.join(process.cwd(), 'mcp-servers.json');
+      if (fs.existsSync(mcpConfigPath)) {
+        try {
+          const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf-8'));
+          Object.assign(allMcps, mcpConfig.mcpServers || {});
+        } catch {}
+      }
+      Object.assign(allMcps, homeClaudeParsed.mcpServers || {});
+      // Collect MCP servers from .mcp.json in group's workDir
+      if (group.workDir) {
+        const mcpJsonPath = path.join(path.resolve(group.workDir), '.mcp.json');
+        if (fs.existsSync(mcpJsonPath)) {
+          try {
+            const mcpJson = JSON.parse(fs.readFileSync(mcpJsonPath, 'utf-8'));
+            for (const [name, config] of Object.entries(mcpJson.mcpServers || {})) {
+              if (!allMcps[name]) allMcps[name] = config;
+            }
+          } catch {}
+        }
+      }
       const allowed = group.allowedMcpServers || [];
       const isAllMode = allowed.includes('__all__');
-      for (const [name, config] of Object.entries(globalMcps)) {
+      for (const [name, config] of Object.entries(allMcps)) {
         if (name === 'nanoclaw') continue; // already defined per-group
         if (isAllMode || allowed.includes(name)) {
           settings.mcpServers[name] = config as any;
@@ -280,6 +309,9 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
       }
       // Re-write settings.json with any merged MCP servers
       fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
+      // Write standalone MCP config for --mcp-config --strict-mcp-config
+      const mcpConfigFile = path.join(claudeDir, 'mcp-config.json');
+      fs.writeFileSync(mcpConfigFile, JSON.stringify({ mcpServers: settings.mcpServers }, null, 2) + '\n');
     } catch {
       // JSON parse failed — settings.json already written above
     }
@@ -333,7 +365,10 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
 
   // Copy settings + skills into the group's working directory .claude/
   // so claude picks them up as project-level config (no CLAUDE_CONFIG_DIR needed)
-  const projectClaudeDir = path.join(groupWorkDir(group.folder, group.workDir), '.claude');
+  const projectClaudeDir = path.join(
+    groupWorkDir(group.folder, group.workDir),
+    '.claude',
+  );
   fs.mkdirSync(projectClaudeDir, { recursive: true });
   fs.copyFileSync(settingsFile, path.join(projectClaudeDir, 'settings.json'));
   if (fs.existsSync(skillsDst)) {
@@ -350,6 +385,7 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
   // Clean up old transcript files (> 7 days) on each session setup
   cleanOldTranscripts(group.folder, group.workDir);
 
+  const mcpConfigFile = path.join(claudeDir, 'mcp-config.json');
   const wrapper = `#!/bin/bash
 # Run claude-lts in print mode and write done marker on completion
 export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
@@ -357,10 +393,17 @@ export NANOCLAW_CHAT_JID="${chatJid}"
 export NANOCLAW_GROUP_FOLDER="${group.folder}"
 export NANOCLAW_IS_MAIN="${group.isMain ? '1' : '0'}"
 export NANOCLAW_IPC_DIR="${ipcDir}"
-MODEL="${group.contextWindow === '1m'
-  ? (group.model === 'sonnet' ? 'claude-sonnet-4-6[1m]' : 'claude-opus-4-6[1m]')
-  : (group.model === 'sonnet' ? 'sonnet' : 'opus')}"
+MODEL="${
+    group.contextWindow === '1m'
+      ? group.model === 'sonnet'
+        ? 'claude-sonnet-4-6[1m]'
+        : 'claude-opus-4-6[1m]'
+      : group.model === 'sonnet'
+        ? 'sonnet'
+        : 'opus'
+  }"
 CLAUDE_BIN="${CLAUDE_BIN}"
+MCP_CONFIG="${mcpConfigFile}"
 PROMPT_FILE="$1"
 SESSION_ARG="$2"
 DONE_FILE="$3"
@@ -374,7 +417,7 @@ PROMPT=$(cat "$PROMPT_FILE")
 rm -f "$PROMPT_FILE"
 
 STREAM_LOG="\${DONE_FILE%.json}.stream"
-"$CLAUDE_BIN" -p "$PROMPT" $RESUME_FLAG --model "$MODEL" --output-format stream-json --verbose --dangerously-skip-permissions 2>"$DONE_FILE.stderr" | tee "$STREAM_LOG"
+"$CLAUDE_BIN" -p "$PROMPT" $RESUME_FLAG --model "$MODEL" --mcp-config "$MCP_CONFIG" --strict-mcp-config --output-format stream-json --verbose --dangerously-skip-permissions 2>"$DONE_FILE.stderr" | tee "$STREAM_LOG"
 
 EXIT_CODE=\${PIPESTATUS[0]}
 echo "{\\"type\\":\\"done\\",\\"exit_code\\":$EXIT_CODE}" > "$DONE_FILE"
@@ -534,7 +577,10 @@ export async function runTmuxAgent(
   // Check transcript size — skip resume if > 5MB to avoid corruption/slowness
   let sessionArg = input.sessionId || 'new';
   const willResume = sessionArg !== 'new';
-  if (willResume && isTranscriptOversized(input.groupFolder, sessionArg, group.workDir)) {
+  if (
+    willResume &&
+    isTranscriptOversized(input.groupFolder, sessionArg, group.workDir)
+  ) {
     sessionArg = 'new';
   }
 
@@ -612,12 +658,16 @@ export async function runTmuxAgent(
           }
           // Extract contextWindow from result event's modelUsage
           if (parsed.type === 'result' && parsed.modelUsage) {
-            const models = Object.values(parsed.modelUsage) as Array<{ contextWindow?: number }>;
+            const models = Object.values(parsed.modelUsage) as Array<{
+              contextWindow?: number;
+            }>;
             if (models.length > 0 && models[0].contextWindow) {
               resultContextWindow = models[0].contextWindow;
             }
           }
-        } catch { /* not JSON, skip */ }
+        } catch {
+          /* not JSON, skip */
+        }
         const events = parseStreamLine(trimmed, emittedKeys);
         for (const evt of events) {
           emittedCount++;
@@ -749,6 +799,14 @@ export async function runTmuxAgent(
           data.exit_code === 0 &&
           resultText &&
           !resultText.includes('Not logged in');
+        // Use orchestrator-measured wall time instead of claude-lts's cumulative duration_ms.
+        // claude-lts accumulates duration_ms/duration_api_ms across --resume invocations,
+        // making it useless for per-invocation performance alerts.
+        const actualWallMs = Date.now() - startTime;
+        if (resultPerformance) {
+          resultPerformance.durationMs = actualWallMs;
+        }
+
         const output: TmuxOutput = {
           status: data.exit_code === 0 ? 'success' : 'error',
           result: resultText,
@@ -795,13 +853,28 @@ export async function runTmuxAgent(
   }
 
   // Kill the tmux session on timeout — the retry will create a fresh one
-  logger.error({ session: name, nonce }, 'Tmux turn timed out, killing session');
+  logger.error(
+    { session: name, nonce },
+    'Tmux turn timed out, killing session',
+  );
   killSession(input.groupFolder);
 
   // Clean up temp files
-  try { fs.unlinkSync(doneFile); } catch { /* ignore */ }
-  try { fs.unlinkSync(`${doneFile}.stderr`); } catch { /* ignore */ }
-  try { fs.unlinkSync(doneFile.replace(/\.json$/, '.stream')); } catch { /* ignore */ }
+  try {
+    fs.unlinkSync(doneFile);
+  } catch {
+    /* ignore */
+  }
+  try {
+    fs.unlinkSync(`${doneFile}.stderr`);
+  } catch {
+    /* ignore */
+  }
+  try {
+    fs.unlinkSync(doneFile.replace(/\.json$/, '.stream'));
+  } catch {
+    /* ignore */
+  }
 
   return {
     status: 'error',
@@ -833,4 +906,18 @@ export function killSession(folder: string): void {
   const name = tmuxSessionName(folder);
   tmuxExec(`${TMUX_BIN} kill-session -t ${name} 2>/dev/null`);
   logger.info({ session: name }, 'Tmux session killed');
+}
+
+/**
+ * Interrupt the running agent in a tmux session (Ctrl+C).
+ * Stops the current turn without destroying the session or transcript.
+ */
+export function interruptSession(folder: string): void {
+  const name = tmuxSessionName(folder);
+  if (!sessionExists(folder)) {
+    logger.warn({ session: name }, 'No session to interrupt');
+    return;
+  }
+  tmuxExec(`${TMUX_BIN} send-keys -t ${name} C-c 2>/dev/null`);
+  logger.info({ session: name }, 'Sent Ctrl+C to tmux session');
 }

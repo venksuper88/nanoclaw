@@ -10,18 +10,15 @@ import {
   createTodo,
   deleteTask,
   deleteTodo,
-  deleteReminder,
   getTaskById,
   getTodoById,
-  getReminderById,
   storeMessage,
   updateTask,
   updateTodo,
-  updateReminder,
 } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import { RegisteredGroup, getPrimaryUserId } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -30,6 +27,7 @@ export interface IpcDeps {
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
   getAvailableGroups: () => Promise<AvailableGroup[]>;
+  runCommand?: (commandName: string, groupFolder: string, chatJid: string, input: Record<string, unknown>) => Promise<void>;
   writeGroupsSnapshot: (
     groupFolder: string,
     isMain: boolean,
@@ -39,6 +37,47 @@ export interface IpcDeps {
   onTasksChanged: () => void;
   onMemoryWriteBack?: (groupFolder: string, text: string) => void;
   onShutdown?: () => Promise<void>;
+  enqueueMessageCheck?: (chatJid: string) => void;
+}
+
+/**
+ * Compute next date for a recurring todo (same logic as routes.ts).
+ * Presets: daily, weekday, weekly, monthly, yearly.
+ */
+function computeNextRecurringDate(
+  fromIso: string,
+  recurrence: string,
+): string | null {
+  const from = new Date(fromIso);
+  if (isNaN(from.getTime())) return null;
+  switch (recurrence) {
+    case 'daily':
+      from.setDate(from.getDate() + 1);
+      return from.toISOString();
+    case 'weekday': {
+      do {
+        from.setDate(from.getDate() + 1);
+      } while (from.getDay() === 0 || from.getDay() === 6);
+      return from.toISOString();
+    }
+    case 'weekly':
+      from.setDate(from.getDate() + 7);
+      return from.toISOString();
+    case 'monthly': {
+      const origDay = from.getDate();
+      from.setMonth(from.getMonth() + 1);
+      if (from.getDate() < origDay) from.setDate(0);
+      return from.toISOString();
+    }
+    case 'yearly': {
+      const origDay = from.getDate();
+      from.setFullYear(from.getFullYear() + 1);
+      if (from.getDate() < origDay) from.setDate(0);
+      return from.toISOString();
+    }
+    default:
+      return null;
+  }
 }
 
 let ipcWatcherRunning = false;
@@ -105,7 +144,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       'groups',
                       sourceGroup,
                     );
-                    // Translate container paths to host paths:
+                    const projectRoot = path.resolve(DATA_DIR, '..');
+                    // Translate container paths to host paths (legacy):
                     // /workspace/group/... → groups/{sourceGroup}/...
                     // /workspace/project/groups/... → groups/...
                     let hostPath = data.filePath;
@@ -125,11 +165,17 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       );
                     }
                     const resolved = path.resolve(groupDir, hostPath);
-                    // Security: only allow files from within the group folder or /tmp
-                    if (
-                      resolved.startsWith(path.resolve(groupDir)) ||
-                      resolved.startsWith('/tmp/')
-                    ) {
+                    // Security: allow files from group folder, project root, workDir, or /tmp
+                    const groupConfig = registeredGroups[data.chatJid];
+                    const allowedPaths = [
+                      path.resolve(groupDir),
+                      path.resolve(projectRoot),
+                      '/tmp/',
+                    ];
+                    if (groupConfig?.workDir) {
+                      allowedPaths.push(path.resolve(groupConfig.workDir));
+                    }
+                    if (allowedPaths.some((p) => resolved.startsWith(p))) {
                       await deps.sendFile(
                         data.chatJid,
                         resolved,
@@ -149,20 +195,26 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   } else {
                     await deps.sendMessage(data.chatJid, data.text);
                   }
-                  // Persist IPC messages in DB so they survive page refresh
+                  // Persist IPC messages in DB so they survive page refresh.
+                  // Store as non-bot so getMessagesSince picks them up for agent processing.
                   const groupName = targetGroup?.name || sourceGroup;
+                  const ipcTimestamp =
+                    data.timestamp || new Date().toISOString();
                   storeMessage({
                     id: `ipc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
                     chat_jid: data.chatJid,
                     sender: data.sender || groupName,
                     sender_name: data.sender || groupName,
                     content: data.text,
-                    timestamp: data.timestamp || new Date().toISOString(),
+                    timestamp: ipcTimestamp,
                     is_from_me: false,
-                    is_bot_message: true,
                   }).catch((err) =>
                     logger.warn({ err }, 'Failed to store IPC message'),
                   );
+                  // Trigger agent processing for the target group
+                  if (deps.enqueueMessageCheck) {
+                    deps.enqueueMessageCheck(data.chatJid);
+                  }
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup },
                     'IPC message sent',
@@ -282,8 +334,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
 }
 
 export async function processTaskIpc(
-  data: Record<string, any> & { type: string;
-  },
+  data: Record<string, any> & { type: string },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
   deps: IpcDeps,
@@ -567,11 +618,13 @@ export async function processTaskIpc(
       }
       break;
 
-    case 'restart_service':
-      if (!isMain) {
+    case 'restart_service': {
+      // Hard restriction: only BuildPo can restart the service
+      const RESTART_ALLOWED_FOLDERS = ['dashboard_buildpo'];
+      if (!RESTART_ALLOWED_FOLDERS.includes(sourceGroup)) {
         logger.warn(
           { sourceGroup },
-          'Unauthorized restart_service attempt blocked',
+          'Unauthorized restart_service attempt blocked — only BuildPo can restart',
         );
         break;
       }
@@ -592,15 +645,17 @@ export async function processTaskIpc(
         }, 1500);
       })();
       break;
+    }
 
     // ── Todos ──
     case 'add_todo': {
-      const group = registeredGroups[
-        Object.keys(registeredGroups).find(
-          (jid) => registeredGroups[jid].folder === sourceGroup,
-        ) || ''
-      ];
-      const userId = group?.memoryUserId || 'venky';
+      const group =
+        registeredGroups[
+          Object.keys(registeredGroups).find(
+            (jid) => registeredGroups[jid].folder === sourceGroup,
+          ) || ''
+        ];
+      const userId = getPrimaryUserId(group?.memoryUserId);
       const todoId = `todo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const now = new Date().toISOString();
       await createTodo({
@@ -611,7 +666,9 @@ export async function processTaskIpc(
         status: 'pending',
         priority: data.priority || 'medium',
         due_date: data.due_date ? new Date(data.due_date).toISOString() : null,
-        remind_at: data.remind_at ? new Date(data.remind_at).toISOString() : null,
+        remind_at: data.remind_at
+          ? new Date(data.remind_at).toISOString()
+          : null,
         recurrence: data.recurrence || null,
         reminder_fired_at: null,
         created_by: sourceGroup,
@@ -626,14 +683,42 @@ export async function processTaskIpc(
       if (data.todoId) {
         const todo = await getTodoById(data.todoId);
         if (todo) {
+          // Handle recurring todo completion — advance due date instead of marking done
+          if (data.status === 'done' && todo.recurrence) {
+            const nextDue = computeNextRecurringDate(
+              todo.due_date || new Date().toISOString(),
+              todo.recurrence,
+            );
+            if (nextDue) {
+              const nextRemind = todo.remind_at
+                ? computeNextRecurringDate(todo.remind_at, todo.recurrence)
+                : null;
+              await updateTodo(data.todoId, {
+                due_date: nextDue,
+                remind_at: nextRemind,
+                reminder_fired_at: null,
+              } as any);
+              logger.info(
+                { todoId: data.todoId, sourceGroup, nextDue },
+                'Recurring todo advanced via IPC',
+              );
+              break;
+            }
+          }
           const updates: Record<string, string> = {};
           if (data.title) updates.title = data.title;
           if (data.data) updates.data = data.data;
           if (data.status) updates.status = data.status;
           if (data.priority) updates.priority = data.priority;
           if (data.due_date) updates.due_date = data.due_date;
+          if (data.remind_at)
+            updates.remind_at = new Date(data.remind_at).toISOString();
+          if (data.recurrence) updates.recurrence = data.recurrence;
           await updateTodo(data.todoId, updates);
-          logger.info({ todoId: data.todoId, sourceGroup }, 'Todo updated via IPC');
+          logger.info(
+            { todoId: data.todoId, sourceGroup },
+            'Todo updated via IPC',
+          );
         }
       }
       break;
@@ -642,66 +727,23 @@ export async function processTaskIpc(
     case 'delete_todo': {
       if (data.todoId) {
         await deleteTodo(data.todoId);
-        logger.info({ todoId: data.todoId, sourceGroup }, 'Todo deleted via IPC');
+        logger.info(
+          { todoId: data.todoId, sourceGroup },
+          'Todo deleted via IPC',
+        );
       }
       break;
     }
 
-    // ── Reminders (creates a todo with remind_at) ──
-    case 'add_reminder': {
-      const remGroup = registeredGroups[
-        Object.keys(registeredGroups).find(
-          (jid) => registeredGroups[jid].folder === sourceGroup,
-        ) || ''
-      ];
-      const remUserId = remGroup?.memoryUserId || 'venky';
-      const remTodoId = `todo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const remNow = new Date().toISOString();
-      const remindAtUtc = data.remind_at ? new Date(data.remind_at).toISOString() : remNow;
-      await createTodo({
-        id: remTodoId,
-        user_id: remUserId,
-        title: data.title,
-        data: data.data || null,
-        status: 'pending',
-        priority: 'medium',
-        due_date: null,
-        remind_at: remindAtUtc,
-        recurrence: data.recurrence || null,
-        reminder_fired_at: null,
-        created_by: sourceGroup,
-        created_at: remNow,
-        updated_at: remNow,
-      });
-      logger.info({ todoId: remTodoId, sourceGroup }, 'Reminder todo created via IPC');
-      break;
-    }
-
-    case 'update_reminder': {
-      if (data.reminderId) {
-        const rem = await getReminderById(data.reminderId);
-        if (rem) {
-          const updates: Record<string, string> = {};
-          if (data.title) updates.title = data.title;
-          if (data.data) updates.data = data.data;
-          if (data.remind_at) updates.remind_at = data.remind_at;
-          if (data.recurrence) updates.recurrence = data.recurrence;
-          await updateReminder(data.reminderId, updates);
-        }
-      }
-      break;
-    }
-
-    case 'dismiss_reminder': {
-      if (data.reminderId) {
-        await updateReminder(data.reminderId, { status: 'dismissed' });
-      }
-      break;
-    }
-
-    case 'snooze_reminder': {
-      if (data.reminderId && data.snooze_until) {
-        await updateReminder(data.reminderId, { status: 'snoozed', snoozed_until: data.snooze_until });
+    case 'run_command': {
+      if (data.commandName && deps.runCommand) {
+        const chatJid = data.chatJid || '';
+        const input = (data.input as Record<string, unknown>) || {};
+        await deps.runCommand(data.commandName, sourceGroup, chatJid, input);
+        logger.info(
+          { commandName: data.commandName, sourceGroup },
+          'Command execution requested via IPC',
+        );
       }
       break;
     }

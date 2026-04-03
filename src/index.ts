@@ -19,6 +19,7 @@ import {
   setChatSendFn,
   setActiveGroupsFn,
   setMemoryService,
+  setSessionInterruptFn,
   setSessionKillFn,
 } from './dashboard/routes.js';
 import { startDashboard } from './dashboard/server.js';
@@ -29,18 +30,21 @@ import {
   getRegisteredChannelNames,
 } from './channels/registry.js';
 import {
+  writeCommandsSnapshot,
   writeGroupsSnapshot,
-  writeRemindersSnapshot,
   writeTasksSnapshot,
   writeTodosSnapshot,
 } from './ipc-snapshots.js';
 import {
   ensureSession as ensureTmuxSession,
+  interruptSession,
+  killSession as killTmuxSession,
   recoverSessions as recoverTmuxSessions,
   runTmuxAgent,
   TmuxStreamEvent,
 } from './tmux-runner.js';
 import { handleSessionCommand } from './session-commands.js';
+import { listCommands, runCommand } from './commands.js';
 import {
   getAllChats,
   getAllMessagesSince,
@@ -51,7 +55,6 @@ import {
   getNewMessages,
   getRouterState,
   getTodosByUser,
-  getRemindersByUser,
   initDatabase,
   recordTokenUsage,
   setRegisteredGroup,
@@ -59,11 +62,19 @@ import {
   setSession,
   storeChatMetadata,
   storeMessage,
+  insertAlert,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  findChannel,
+  formatMessages,
+  formatOutbound,
+  preCompressAttachments,
+  compressAllAttachments,
+  extractAttachments,
+} from './router.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -77,7 +88,13 @@ import {
 } from './sender-allowlist.js';
 import { MemoryService } from './memory.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { AgentOutput, Channel, NewMessage, RegisteredGroup } from './types.js';
+import {
+  AgentOutput,
+  Channel,
+  NewMessage,
+  RegisteredGroup,
+  getPrimaryUserId,
+} from './types.js';
 import { logger } from './logger.js';
 import { initPushService, sendPushNotification } from './push.js';
 
@@ -94,6 +111,9 @@ let dbErrorCount = 0;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 const memoryService = new MemoryService();
+
+/** Per-group flag: next processGroupMessages run should use stateless mode */
+const statelessPending: Record<string, boolean> = {};
 
 async function loadState(): Promise<void> {
   lastTimestamp = (await getRouterState('last_timestamp')) || '';
@@ -229,11 +249,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             timestamp: new Date().toISOString(),
             is_from_me: true,
             is_bot_message: true,
-          }).catch((err) => logger.warn({ err }, 'storeMessage (session cmd) failed'));
+          }).catch((err) =>
+            logger.warn({ err }, 'storeMessage (session cmd) failed'),
+          );
         }
       },
-      setTyping: async (typing) => { await channel?.setTyping?.(chatJid, typing); },
-      runAgent: async (prompt, onOutput) => runAgent(group, prompt, chatJid, onOutput),
+      setTyping: async (typing) => {
+        await channel?.setTyping?.(chatJid, typing);
+      },
+      runAgent: async (prompt, onOutput) =>
+        runAgent(group, prompt, chatJid, false, onOutput),
       advanceCursor: (timestamp) => {
         lastAgentTimestamp[chatJid] = timestamp;
         saveState().catch(() => {});
@@ -243,8 +268,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       clearSession: async () => {
         delete sessions[group.folder];
         await setSession(group.folder, '').catch(() => {});
-        const tmuxName = `nanoclaw-${group.folder}`;
-        try { execSync(`/opt/homebrew/bin/tmux kill-session -t ${tmuxName} 2>/dev/null`); } catch {}
+        killTmuxSession(group.folder);
       },
     },
   });
@@ -261,18 +285,37 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
+  // Compress all images in attachments dir (in-place) before agent runs
+  await compressAllAttachments(group.folder);
+  await preCompressAttachments(missedMessages, group.folder);
+  await extractAttachments(missedMessages, group.folder);
   const rawPrompt = formatMessages(missedMessages, TIMEZONE, group.folder);
 
+  // Determine stateless mode: explicit toggle from dashboard, or email-forwarded messages
+  // Gmail forwards emails with sender = email address (contains @)
+  const isEmailMessage = missedMessages.some((m) => !m.is_from_me && m.sender.includes('@'));
+  const isStateless =
+    statelessPending[chatJid] === true ||
+    isEmailMessage;
+  if (statelessPending[chatJid]) delete statelessPending[chatJid];
+
   // Memory: start session tracking and enrich with relevant memories
-  memoryService.startSession(group.folder);
-  const prompt = await memoryService.enrichMessage(
-    chatJid,
-    group.folder,
-    rawPrompt,
-    group.memoryMode || 'full',
-    group.memoryScopes,
-    group.memoryUserId,
-  );
+  // Skip memory enrichment for stateless turns — no context needed
+  let prompt: string;
+  if (isStateless) {
+    prompt = rawPrompt;
+    logger.info({ group: group.name }, 'Stateless turn — skipping memory enrichment');
+  } else {
+    memoryService.startSession(group.folder);
+    prompt = await memoryService.enrichMessage(
+      chatJid,
+      group.folder,
+      rawPrompt,
+      group.memoryMode || 'full',
+      group.memoryScopes,
+      group.memoryUserId,
+    );
+  }
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -316,7 +359,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
+  const sessionMode = isStateless ? 'stateless' as const : 'stateful' as const;
+  const output = await runAgent(group, prompt, chatJid, isStateless, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -388,7 +432,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         (result.usage.input_tokens ?? 0) +
         (result.usage.cache_creation_input_tokens ?? 0) +
         (result.usage.cache_read_input_tokens ?? 0);
-      const contextWindowSize = 1_000_000; // Claude Opus 4.6 1M context
+      const contextWindowSize = result.usage.contextWindow || 200_000; // From result event, fallback 200K
       const percent = Math.round((totalTokens / contextWindowSize) * 100);
       if (percent > 0) {
         const sizeKB = Math.round((totalTokens * 4) / 1024);
@@ -399,10 +443,72 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         });
         contextCache[group.folder] = { percent, sizeKB, tokens: totalTokens };
         // Persist to DB so it survives restarts
-        setRouterState(`context_pct:${group.folder}`, JSON.stringify({ percent, sizeKB, tokens: totalTokens })).catch(() => {});
+        setRouterState(
+          `context_pct:${group.folder}`,
+          JSON.stringify({ percent, sizeKB, tokens: totalTokens }),
+        ).catch(() => {});
       }
-      // Record token usage for analytics
-      recordTokenUsage(group.folder, result.usage).catch(() => {});
+      // Record token usage for analytics (tagged with session mode)
+      recordTokenUsage(group.folder, result.usage, sessionMode).catch(() => {});
+    }
+
+    // Performance alerts — check thresholds and emit alerts
+    if (result.performance) {
+      const perf = result.performance;
+      const alerts: Array<{ type: string; message: string }> = [];
+
+      if (perf.durationMs > 180_000) {
+        // > 3 min wall time
+        const mins = (perf.durationMs / 60_000).toFixed(1);
+        alerts.push({
+          type: 'slow_response',
+          message: `${group.name} took ${mins}min (${perf.numTurns} turns, $${perf.costUsd.toFixed(2)})`,
+        });
+      }
+      if (perf.numTurns > 10) {
+        alerts.push({
+          type: 'high_turns',
+          message: `${group.name} used ${perf.numTurns} turns — likely over-orchestrating`,
+        });
+      }
+      if (perf.costUsd > 0.5) {
+        // > $0.50 per invocation
+        alerts.push({
+          type: 'high_cost',
+          message: `${group.name} cost $${perf.costUsd.toFixed(2)} in a single invocation`,
+        });
+      }
+
+      // Context % alert
+      const contextPct = contextCache[group.folder]?.percent ?? 0;
+      if (contextPct > 80) {
+        alerts.push({
+          type: 'high_context',
+          message: `${group.name} at ${contextPct}% context — consider /compact or /new`,
+        });
+      }
+
+      for (const alert of alerts) {
+        const timestamp = new Date().toISOString();
+        insertAlert({
+          group_folder: group.folder,
+          group_name: group.name,
+          type: alert.type,
+          message: alert.message,
+          duration_ms: perf.durationMs,
+          num_turns: perf.numTurns,
+          cost_usd: perf.costUsd,
+          context_percent: contextPct,
+          created_at: timestamp,
+        }).catch(() => {});
+        dashboardEvents.emitEvent('agent:alert', {
+          groupName: group.name,
+          groupFolder: group.folder,
+          type: alert.type as any,
+          message: alert.message,
+          timestamp,
+        });
+      }
     }
 
     if (result.status === 'success') {
@@ -454,10 +560,12 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
+  stateless: boolean = false,
   onOutput?: (output: AgentOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = group.isTransient ? undefined : sessions[group.folder];
+  // Stateless mode: force fresh session (no --resume), don't use stored session ID
+  const sessionId = stateless ? undefined : (group.isTransient ? undefined : sessions[group.folder]);
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = await getAllTasks();
@@ -476,19 +584,21 @@ async function runAgent(
   );
 
   // Write todos and reminders snapshots (scoped by user)
-  const userId = group.memoryUserId || 'venky';
+  const userId = getPrimaryUserId(group.memoryUserId);
   const todos = await getTodosByUser(userId, true);
-  writeTodosSnapshot(group.folder, todos.map((t) => ({
-    id: t.id, user_id: t.user_id, title: t.title, data: t.data,
-    status: t.status, priority: t.priority, due_date: t.due_date, created_at: t.created_at,
-  })));
-  const reminders = await getRemindersByUser(userId);
-  writeRemindersSnapshot(group.folder, reminders.map((r) => ({
-    id: r.id, user_id: r.user_id, title: r.title, data: r.data,
-    remind_at: r.remind_at, recurrence: r.recurrence, status: r.status,
-    snoozed_until: r.snoozed_until, created_at: r.created_at,
-  })));
-
+  writeTodosSnapshot(
+    group.folder,
+    todos.map((t) => ({
+      id: t.id,
+      user_id: t.user_id,
+      title: t.title,
+      data: t.data,
+      status: t.status,
+      priority: t.priority,
+      due_date: t.due_date,
+      created_at: t.created_at,
+    })),
+  );
   // Update available groups snapshot (main group only can see all groups)
   const availableGroups = await getAvailableGroups();
   writeGroupsSnapshot(
@@ -498,127 +608,148 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
+  // Write commands snapshot for agent to read via list_commands MCP tool
+  writeCommandsSnapshot(group.folder, listCommands(group.folder));
+
   const agentStart = Date.now();
+
+  // Stuck agent detection: emit warning if no completion within 5 minutes
+  const STUCK_THRESHOLD_MS = 5 * 60 * 1000;
+  const stuckTimer = setTimeout(() => {
+    dashboardEvents.emitEvent('agent:stuck', {
+      groupName: group.name,
+      groupFolder: group.folder,
+      elapsedMs: Date.now() - agentStart,
+    });
+    logger.warn(
+      { group: group.name, elapsedMs: Date.now() - agentStart },
+      'Agent appears stuck (5min with no completion)',
+    );
+  }, STUCK_THRESHOLD_MS);
 
   // All groups use tmux mode
   try {
-      ensureTmuxSession(group, chatJid);
+    ensureTmuxSession(group, chatJid);
 
-      // Emit agent:spawn so dashboard shows activity indicator
-      dashboardEvents.emitEvent('agent:spawn', {
-        groupName: group.name,
-        groupFolder: group.folder,
-        containerName: 'tmux',
-      });
+    // Emit agent:spawn so dashboard shows activity indicator
+    dashboardEvents.emitEvent('agent:spawn', {
+      groupName: group.name,
+      groupFolder: group.folder,
+      containerName: 'tmux',
+    });
 
-      // Forward real-time stream events (text + SendMessage + activity) to the dashboard
-      const agentName = group.name || ASSISTANT_NAME;
-      const handleStreamEvent = (evt: TmuxStreamEvent) => {
-        logger.info(
-          { evtType: evt.type, contentLen: evt.content?.length, chatJid },
-          'handleStreamEvent called',
-        );
-        const content = evt.content;
-        if (!content) return;
-
-        // Activity events → container:log (shows in terminal panel)
-        if (evt.type === 'activity') {
-          dashboardEvents.emitEvent('container:log', {
-            groupName: group.name,
-            groupFolder: group.folder,
-            line: content,
-            stream: 'stdout',
-          });
-          return;
-        }
-
-        // Text + SendMessage events → message:new (shows in chat) + store to DB
-        const sender = evt.sender || agentName;
-        const msgId = `stream-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-        const timestamp = new Date().toISOString();
-        dashboardEvents.emitEvent('message:new', {
-          chatJid,
-          sender,
-          senderName: sender,
-          content,
-          timestamp,
-          isFromMe: true,
-          isBotMessage: true,
-          isStreamed: true,
-        });
-        // Persist streamed messages to DB so they survive page refresh.
-        // onOutput will skip DB storage when streamed=true to avoid duplicates.
-        storeMessage({
-          id: msgId,
-          chat_jid: chatJid,
-          sender,
-          sender_name: sender,
-          content,
-          timestamp,
-          is_from_me: true,
-          is_bot_message: true,
-        }).catch((err) => logger.warn({ err }, 'storeMessage (stream) failed'));
-      };
-
-      const output = await runTmuxAgent(
-        group,
-        {
-          prompt,
-          sessionId,
-          groupFolder: group.folder,
-          chatJid,
-          isMain,
-          assistantName: ASSISTANT_NAME,
-        },
-        handleStreamEvent,
+    // Forward real-time stream events (text + SendMessage + activity) to the dashboard
+    const agentName = group.name || ASSISTANT_NAME;
+    const handleStreamEvent = (evt: TmuxStreamEvent) => {
+      logger.info(
+        { evtType: evt.type, contentLen: evt.content?.length, chatJid },
+        'handleStreamEvent called',
       );
+      const content = evt.content;
+      if (!content) return;
 
-
-      // Emit agent:exit so dashboard hides activity indicator
-      dashboardEvents.emitEvent('agent:exit', {
-        groupName: group.name,
-        groupFolder: group.folder,
-        duration: Date.now() - agentStart,
-      });
-
-      // Track session for resume
-      if (output.newSessionId && !group.isTransient) {
-        sessions[group.folder] = output.newSessionId;
-        setSession(group.folder, output.newSessionId).catch((err) =>
-          logger.warn({ err }, 'setSession failed'),
-        );
+      // Activity events → container:log (shows in terminal panel)
+      if (evt.type === 'activity') {
+        dashboardEvents.emitEvent('container:log', {
+          groupName: group.name,
+          groupFolder: group.folder,
+          line: content,
+          stream: 'stdout',
+        });
+        return;
       }
 
-      // Deliver result via onOutput for DB storage, channel delivery, and memory accumulation.
-      // The streaming handler above only emits real-time dashboard events (no DB store).
-      // Mark as streamed so onOutput skips the agent:output dashboard emission (already shown).
-      if (output.result && onOutput) {
-        await onOutput({
-          status: output.status,
-          result: output.result,
-          newSessionId: output.newSessionId,
-          streamed: true,
-          usage: output.usage,
-        });
-      } else if (output.usage && onOutput) {
-        // Even without result, emit usage for context%
-        await onOutput({
-          status: output.status,
-          result: null,
-          usage: output.usage,
-        });
-      }
-
-      return output.status === 'error' ? 'error' : 'success';
-    } catch (err) {
-      dashboardEvents.emitEvent('agent:exit', {
-        groupName: group.name,
-        groupFolder: group.folder,
-        duration: Date.now() - agentStart,
+      // Text + SendMessage events → message:new (shows in chat) + store to DB
+      const sender = evt.sender || agentName;
+      const msgId = `stream-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const timestamp = new Date().toISOString();
+      dashboardEvents.emitEvent('message:new', {
+        chatJid,
+        sender,
+        senderName: sender,
+        content,
+        timestamp,
+        isFromMe: true,
+        isBotMessage: true,
+        isStreamed: true,
       });
-      logger.error({ group: group.name, err }, 'Agent error');
-      return 'error';
+      // Persist streamed messages to DB so they survive page refresh.
+      // onOutput will skip DB storage when streamed=true to avoid duplicates.
+      storeMessage({
+        id: msgId,
+        chat_jid: chatJid,
+        sender,
+        sender_name: sender,
+        content,
+        timestamp,
+        is_from_me: true,
+        is_bot_message: true,
+      }).catch((err) => logger.warn({ err }, 'storeMessage (stream) failed'));
+    };
+
+    const output = await runTmuxAgent(
+      group,
+      {
+        prompt,
+        sessionId,
+        groupFolder: group.folder,
+        chatJid,
+        isMain,
+        assistantName: ASSISTANT_NAME,
+      },
+      handleStreamEvent,
+    );
+
+    clearTimeout(stuckTimer);
+
+    // Emit agent:exit so dashboard hides activity indicator
+    dashboardEvents.emitEvent('agent:exit', {
+      groupName: group.name,
+      groupFolder: group.folder,
+      duration: Date.now() - agentStart,
+    });
+
+    // Track session for resume — skip for stateless turns to preserve the main session
+    if (output.newSessionId && !group.isTransient && !stateless) {
+      sessions[group.folder] = output.newSessionId;
+      setSession(group.folder, output.newSessionId).catch((err) =>
+        logger.warn({ err }, 'setSession failed'),
+      );
     }
+
+    // Deliver result via onOutput for DB storage, channel delivery, and memory accumulation.
+    // The streaming handler above only emits real-time dashboard events (no DB store).
+    // Mark as streamed so onOutput skips the agent:output dashboard emission (already shown).
+    if (output.result && onOutput) {
+      await onOutput({
+        status: output.status,
+        result: output.result,
+        newSessionId: output.newSessionId,
+        streamed: true,
+        usage: output.usage,
+        performance: output.performance,
+      });
+    } else if (output.usage && onOutput) {
+      // Even without result, emit usage for context%
+      await onOutput({
+        status: output.status,
+        result: null,
+        usage: output.usage,
+        performance: output.performance,
+      });
+    }
+
+    return output.status === 'error' ? 'error' : 'success';
+  } catch (err) {
+    clearTimeout(stuckTimer);
+    dashboardEvents.emitEvent('agent:exit', {
+      groupName: group.name,
+      groupFolder: group.folder,
+      duration: Date.now() - agentStart,
+    });
+    logger.error({ group: group.name, err }, 'Agent error');
+    return 'error';
+  }
 }
 
 async function startMessageLoop(): Promise<void> {
@@ -662,7 +793,10 @@ async function startMessageLoop(): Promise<void> {
           if (!group) continue;
 
           const channel = findChannel(channels, chatJid);
-          if (!channel) {
+          // Dashboard groups (dash:*) have no owning channel — they receive
+          // messages via the dashboard or via cross-channel routing (e.g. Gmail).
+          // The message loop still needs to enqueue them for processing.
+          if (!channel && !chatJid.startsWith('dash:')) {
             logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
             continue;
           }
@@ -693,6 +827,7 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
+          await preCompressAttachments(messagesToSend, group.folder);
           let formatted = formatMessages(
             messagesToSend,
             TIMEZONE,
@@ -729,7 +864,7 @@ async function startMessageLoop(): Promise<void> {
             }
             // Show typing indicator while the container processes the piped message
             channel
-              .setTyping?.(chatJid, true)
+              ?.setTyping?.(chatJid, true)
               ?.catch((err) =>
                 logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
               );
@@ -875,7 +1010,9 @@ async function main(): Promise<void> {
   let dashServer: import('http').Server | null = null;
   if (DASHBOARD_TOKEN) {
     // Wire chat injection: dashboard can send messages to any group
-    setChatSendFn(async (chatJid, text, senderName) => {
+    setChatSendFn(async (chatJid, text, senderName, stateless) => {
+      // Set stateless flag BEFORE enqueuing — processGroupMessages will read it
+      if (stateless) statelessPending[chatJid] = true;
       const msgId = `dash-${Date.now()}`;
       const timestamp = new Date().toISOString();
       // Ensure chat entry exists (dashboard-only groups don't have channel-created entries)
@@ -914,29 +1051,27 @@ async function main(): Promise<void> {
       // Do NOT advance lastAgentTimestamp — processGroupMessages needs to see it
       const group = registeredGroups[chatJid];
       if (group) {
-        const formatted = formatMessages(
-          [
-            {
-              id: msgId,
-              chat_jid: chatJid,
-              sender: 'venky',
-              sender_name: senderName,
-              content: text,
-              timestamp,
-              is_from_me: true,
-            },
-          ],
-          TIMEZONE,
-          group.folder,
-        );
+        const dashMsgs: NewMessage[] = [
+          {
+            id: msgId,
+            chat_jid: chatJid,
+            sender: 'venky',
+            sender_name: senderName,
+            content: text,
+            timestamp,
+            is_from_me: true,
+          },
+        ];
+        await preCompressAttachments(dashMsgs, group.folder);
+        const formatted = formatMessages(dashMsgs, TIMEZONE, group.folder);
         dashboardEvents.emitEvent('agent:spawn', {
           groupName: group.name,
           groupFolder: group.folder,
           containerName: 'dashboard',
         });
-        // Try piping to active container first
-        if (!queue.sendMessage(chatJid, formatted)) {
-          // No active container — use the standard message processing path
+        // Stateless: always go through processGroupMessages for a fresh session
+        // Stateful: try piping to active container first
+        if (stateless || !queue.sendMessage(chatJid, formatted)) {
           queue.enqueueMessageCheck(chatJid);
         }
       }
@@ -949,6 +1084,15 @@ async function main(): Promise<void> {
     // Wire session kill: dashboard can stop a group's active container
     setSessionKillFn((chatJid) => {
       queue.closeStdin(chatJid);
+    });
+
+    // Wire session interrupt: Ctrl+C to stop current turn, preserve session
+    setSessionInterruptFn((chatJid) => {
+      const group = registeredGroups[chatJid];
+      if (group) {
+        interruptSession(group.folder);
+        queue.closeStdin(chatJid);
+      }
     });
 
     // Fire push notifications for incoming messages
@@ -1071,6 +1215,12 @@ async function main(): Promise<void> {
         timestamp: msg.timestamp,
         isFromMe: msg.is_from_me || false,
       });
+      // Dashboard groups (dash:*) have no owning channel, so the message loop
+      // skips them. Enqueue directly so Gmail (and future cross-channel) messages
+      // routed to dashboard groups get processed immediately.
+      if (chatJid.startsWith('dash:') && registeredGroups[chatJid]) {
+        queue.enqueueMessageCheck(chatJid);
+      }
     },
     onChatMetadata: (
       chatJid: string,
@@ -1241,6 +1391,27 @@ async function main(): Promise<void> {
         '🔄 DevenClaw is restarting, back in a moment...',
       ).catch(() => {});
       writeRestartFlag('restart_service');
+    },
+    enqueueMessageCheck: (chatJid: string) => {
+      queue.enqueueMessageCheck(chatJid);
+    },
+    runCommand: async (commandName, groupFolder, chatJid, input) => {
+      const sendMsg = async (text: string) => {
+        const channel = findChannel(channels, chatJid);
+        if (channel) {
+          await channel.sendMessage(chatJid, text);
+        } else {
+          const grp = registeredGroups[chatJid];
+          const agentName = grp?.name || ASSISTANT_NAME;
+          const msgId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const timestamp = new Date().toISOString();
+          storeMessage({ id: msgId, chat_jid: chatJid, sender: agentName, sender_name: agentName, content: text, timestamp, is_from_me: false, is_bot_message: true }).catch(() => {});
+          dashboardEvents.emitEvent('message:new', { chatJid, sender: agentName, senderName: agentName, content: text, timestamp, isFromMe: false });
+        }
+      };
+      runCommand({ commandName, groupFolder, chatJid, input, sendMessage: sendMsg }).catch((err) =>
+        logger.warn({ err, commandName, groupFolder }, 'runCommand failed'),
+      );
     },
     onTasksChanged: () => {
       getAllTasks()

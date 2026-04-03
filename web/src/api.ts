@@ -63,6 +63,38 @@ async function requestFormData<T>(path: string, formData: FormData): Promise<T> 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type ApiResponse<T> = { ok: boolean; data: T; error?: string };
 
+export interface EmailRule {
+  id: string;
+  name: string;
+  priority: number;
+  from_pattern: string;
+  subject_pattern: string;
+  body_pattern: string;
+  action: 'forward' | 'archive' | 'discard' | 'command';
+  target_group: string;
+  command_name: string;
+  extract_prompt: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EmailLogEntry {
+  id: string;
+  message_id: string;
+  thread_id: string;
+  from_address: string;
+  subject: string;
+  rule_id: string | null;
+  rule_name: string | null;
+  action: string;
+  target_group: string | null;
+  summary: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  processed_at: string;
+}
+
 export const api = {
   getProcessing: () =>
     request<ApiResponse<{ activeGroupFolders: string[] }>>('/api/processing'),
@@ -86,10 +118,10 @@ export const api = {
       body: JSON.stringify({ content }),
     }),
 
-  sendChat: (chatJid: string, text: string) =>
+  sendChat: (chatJid: string, text: string, stateless?: boolean) =>
     request<ApiResponse<null>>('/api/chat/send', {
       method: 'POST',
-      body: JSON.stringify({ chatJid, text }),
+      body: JSON.stringify({ chatJid, text, stateless }),
     }),
 
   uploadFile: (folder: string, formData: FormData) =>
@@ -100,6 +132,9 @@ export const api = {
 
   killSession: (jid: string) =>
     request<ApiResponse<null>>(`/api/sessions/${encodeURIComponent(jid)}/kill`, { method: 'POST' }),
+
+  interruptSession: (jid: string) =>
+    request<ApiResponse<null>>(`/api/sessions/${encodeURIComponent(jid)}/interrupt`, { method: 'POST' }),
 
   getTasks: () =>
     request<ApiResponse<Array<{ id: string; group_folder: string; prompt: string; schedule_type: string; schedule_value: string; status: string; next_run: string | null; last_run: string | null; last_result: string | null }>>>('/api/tasks'),
@@ -180,14 +215,26 @@ export const api = {
   deleteToken: (token: string) =>
     request<ApiResponse<{ deleted: boolean }>>(`/api/tokens/${encodeURIComponent(token)}`, { method: 'DELETE' }),
 
-  getCommands: () =>
-    request<ApiResponse<Array<{ command: string; description: string }>>>('/api/commands'),
+  getCommands: (folder?: string) =>
+    request<ApiResponse<Array<{ command: string; description: string; prefix?: string }>>>(`/api/commands${folder ? `?folder=${encodeURIComponent(folder)}` : ''}`),
 
   getSkills: () =>
     request<ApiResponse<Array<{ name: string; description: string; type: string; folder: string }>>>('/api/skills'),
 
   getMcpServers: () =>
     request<ApiResponse<Array<{ name: string; type: string }>>>('/api/mcp-servers'),
+
+  // Email rules
+  getEmailRules: () =>
+    request<ApiResponse<EmailRule[]>>('/api/email-rules'),
+  createEmailRule: (rule: Omit<EmailRule, 'id' | 'created_at' | 'updated_at'>) =>
+    request<ApiResponse<EmailRule>>('/api/email-rules', { method: 'POST', body: JSON.stringify(rule), headers: { 'Content-Type': 'application/json' } }),
+  updateEmailRule: (id: string, updates: Partial<EmailRule>) =>
+    request<ApiResponse<null>>(`/api/email-rules/${id}`, { method: 'PUT', body: JSON.stringify(updates), headers: { 'Content-Type': 'application/json' } }),
+  deleteEmailRule: (id: string) =>
+    request<ApiResponse<null>>(`/api/email-rules/${id}`, { method: 'DELETE' }),
+  getEmailLog: (limit = 50, offset = 0) =>
+    request<ApiResponse<EmailLogEntry[]>>(`/api/email-log?limit=${limit}&offset=${offset}`),
 
   getTokenUsage: (opts?: { days?: number; folder?: string; since?: string; until?: string }) => {
     const params = new URLSearchParams();
@@ -196,7 +243,7 @@ export const api = {
     if (opts?.since) params.set('since', opts.since);
     if (opts?.until) params.set('until', opts.until);
     const qs = params.toString();
-    return request<ApiResponse<Array<{ group_folder: string; total_input: number; total_cache_creation: number; total_cache_read: number; total_output: number; total_tokens: number; turn_count: number }>>>(`/api/token-usage${qs ? `?${qs}` : ''}`);
+    return request<ApiResponse<Array<{ group_folder: string; total_input: number; total_cache_creation: number; total_cache_read: number; total_output: number; total_tokens: number; turn_count: number; stateful_tokens: number; stateless_tokens: number; stateful_turns: number; stateless_turns: number }>>>(`/api/token-usage${qs ? `?${qs}` : ''}`);
   },
 
   getAlerts: () =>
@@ -237,28 +284,6 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ text }),
     }),
-
-  // Email Rules
-  getEmailRules: () =>
-    request<ApiResponse<Array<{ id: string; name: string; priority: number; from_pattern: string; subject_pattern: string; body_pattern: string; action: string; target_group: string; enabled: boolean; created_at: string; updated_at: string }>>>('/api/email-rules'),
-
-  createEmailRule: (rule: { name: string; priority?: number; from_pattern?: string; subject_pattern?: string; body_pattern?: string; action?: string; target_group?: string; enabled?: boolean }) =>
-    request<ApiResponse<{ id: string }>>('/api/email-rules', {
-      method: 'POST',
-      body: JSON.stringify(rule),
-    }),
-
-  updateEmailRule: (id: string, updates: Record<string, any>) =>
-    request<ApiResponse<any>>(`/api/email-rules/${encodeURIComponent(id)}`, {
-      method: 'PUT',
-      body: JSON.stringify(updates),
-    }),
-
-  deleteEmailRule: (id: string) =>
-    request<ApiResponse<null>>(`/api/email-rules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-
-  getEmailLog: (limit = 50) =>
-    request<ApiResponse<Array<{ sender: string; subject: string; rule_name: string | null; action: string; target_group: string | null; processed_at: string }>>>(`/api/email-log?limit=${limit}`),
 
   getExtractionStats: () =>
     request<ApiResponse<{ today: { calls: number; input_tokens: number; output_tokens: number }; week: { calls: number; input_tokens: number; output_tokens: number }; total: { calls: number; input_tokens: number; output_tokens: number }; byType: Record<string, number> }>>('/api/extraction-stats'),

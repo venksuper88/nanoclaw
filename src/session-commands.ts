@@ -147,9 +147,7 @@ export async function handleSessionCommand(opts: {
         `Failed to process messages before ${command}. Try again.`,
       );
       if (preOutputSent) {
-        deps.advanceCursor(
-          preCompactMsgs[preCompactMsgs.length - 1].timestamp,
-        );
+        deps.advanceCursor(preCompactMsgs[preCompactMsgs.length - 1].timestamp);
         return { handled: true, success: true };
       }
       return { handled: true, success: false };

@@ -13,7 +13,6 @@ import { logger } from './logger.js';
 import {
   NewMessage,
   RegisteredGroup,
-  Reminder,
   ScheduledTask,
   TaskRunLog,
   Todo,
@@ -310,6 +309,107 @@ async function createSchema(database: Client): Promise<void> {
   await database.execute(
     `CREATE INDEX IF NOT EXISTS idx_token_usage_folder ON token_usage(group_folder, recorded_at)`,
   );
+
+  // Add session_mode to token_usage (stateful vs stateless analytics)
+  try {
+    await database.execute(
+      `ALTER TABLE token_usage ADD COLUMN session_mode TEXT DEFAULT 'stateful'`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  // Email routing rules
+  await database.execute(`
+    CREATE TABLE IF NOT EXISTS email_rules (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      priority INTEGER NOT NULL DEFAULT 0,
+      from_pattern TEXT NOT NULL DEFAULT '',
+      subject_pattern TEXT NOT NULL DEFAULT '',
+      body_pattern TEXT NOT NULL DEFAULT '',
+      action TEXT NOT NULL DEFAULT 'forward',
+      target_group TEXT NOT NULL DEFAULT '',
+      command_name TEXT NOT NULL DEFAULT '',
+      extract_prompt TEXT NOT NULL DEFAULT '',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  // Migration: add command_name to existing email_rules
+  try {
+    await database.execute(
+      `ALTER TABLE email_rules ADD COLUMN command_name TEXT NOT NULL DEFAULT ''`,
+    );
+  } catch {
+    /* column already exists */
+  }
+  await database.execute(
+    `CREATE INDEX IF NOT EXISTS idx_email_rules_priority ON email_rules(priority)`,
+  );
+
+  // Email processing log
+  await database.execute(`
+    CREATE TABLE IF NOT EXISTS email_log (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      thread_id TEXT,
+      from_address TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      rule_id TEXT,
+      rule_name TEXT,
+      action TEXT NOT NULL,
+      target_group TEXT,
+      summary TEXT,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      processed_at TEXT NOT NULL
+    )
+  `);
+  await database.execute(
+    `CREATE INDEX IF NOT EXISTS idx_email_log_processed ON email_log(processed_at)`,
+  );
+
+  // Migrate old email_log schema if needed
+  const cols = await database.execute('PRAGMA table_info(email_log)');
+  const colNames = new Set(cols.rows.map((r) => r.name as string));
+  const migrations: Array<{ col: string; type: string; dflt: string }> = [
+    { col: 'message_id', type: 'TEXT', dflt: "''" },
+    { col: 'thread_id', type: 'TEXT', dflt: 'NULL' },
+    { col: 'from_address', type: 'TEXT', dflt: "''" },
+    { col: 'rule_id', type: 'TEXT', dflt: 'NULL' },
+    { col: 'summary', type: 'TEXT', dflt: 'NULL' },
+    { col: 'input_tokens', type: 'INTEGER', dflt: '0' },
+    { col: 'output_tokens', type: 'INTEGER', dflt: '0' },
+  ];
+  for (const m of migrations) {
+    if (!colNames.has(m.col)) {
+      await database.execute(
+        `ALTER TABLE email_log ADD COLUMN ${m.col} ${m.type} DEFAULT ${m.dflt}`,
+      );
+    }
+  }
+
+  // Agent performance alerts
+  await database.execute(`
+    CREATE TABLE IF NOT EXISTS agent_alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_folder TEXT NOT NULL,
+      group_name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      message TEXT NOT NULL,
+      duration_ms INTEGER,
+      num_turns INTEGER,
+      cost_usd REAL,
+      context_percent REAL,
+      created_at TEXT NOT NULL,
+      dismissed INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+  await database.execute(
+    `CREATE INDEX IF NOT EXISTS idx_agent_alerts_created ON agent_alerts(created_at)`,
+  );
 }
 
 export async function initDatabase(): Promise<void> {
@@ -318,6 +418,10 @@ export async function initDatabase(): Promise<void> {
 
   // Migrate from JSON files if they exist
   await migrateJsonState();
+}
+
+export function getDbClient(): Client {
+  return db;
 }
 
 /** @internal - for tests only. Creates a fresh in-memory database. */
@@ -717,7 +821,10 @@ export async function logTaskRun(log: TaskRunLog): Promise<void> {
   });
 }
 
-export async function getTaskRunLogs(taskId: string, limit = 20): Promise<TaskRunLog[]> {
+export async function getTaskRunLogs(
+  taskId: string,
+  limit = 20,
+): Promise<TaskRunLog[]> {
   const result = await db.execute({
     sql: 'SELECT * FROM task_run_logs WHERE task_id = ? ORDER BY run_at DESC LIMIT ?',
     args: [taskId, limit],
@@ -731,44 +838,108 @@ export async function createTodo(todo: Todo): Promise<void> {
   await db.execute({
     sql: `INSERT INTO todos (id, user_id, title, data, status, priority, due_date, remind_at, recurrence, reminder_fired_at, created_by, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    args: [todo.id, todo.user_id, todo.title, todo.data ?? null, todo.status, todo.priority, todo.due_date ?? null, todo.remind_at ?? null, todo.recurrence ?? null, todo.reminder_fired_at ?? null, todo.created_by, todo.created_at, todo.updated_at],
+    args: [
+      todo.id,
+      todo.user_id,
+      todo.title,
+      todo.data ?? null,
+      todo.status,
+      todo.priority,
+      todo.due_date ?? null,
+      todo.remind_at ?? null,
+      todo.recurrence ?? null,
+      todo.reminder_fired_at ?? null,
+      todo.created_by,
+      todo.created_at,
+      todo.updated_at,
+    ],
   });
 }
 
 export async function getTodoById(id: string): Promise<Todo | undefined> {
-  const result = await db.execute({ sql: 'SELECT * FROM todos WHERE id = ?', args: [id] });
+  const result = await db.execute({
+    sql: 'SELECT * FROM todos WHERE id = ?',
+    args: [id],
+  });
   return (result.rows[0] ?? undefined) as unknown as Todo | undefined;
 }
 
-export async function getTodosByUser(userId: string, includeCompleted = false): Promise<Todo[]> {
+export async function getTodosByUser(
+  userId: string,
+  includeCompleted = false,
+): Promise<Todo[]> {
   const sql = includeCompleted
-    ? 'SELECT * FROM todos WHERE user_id = ? ORDER BY CASE priority WHEN \'high\' THEN 0 WHEN \'medium\' THEN 1 ELSE 2 END, created_at DESC'
-    : 'SELECT * FROM todos WHERE user_id = ? AND status != \'done\' ORDER BY CASE priority WHEN \'high\' THEN 0 WHEN \'medium\' THEN 1 ELSE 2 END, created_at DESC';
+    ? "SELECT * FROM todos WHERE user_id = ? ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, created_at DESC"
+    : "SELECT * FROM todos WHERE user_id = ? AND status != 'done' ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, created_at DESC";
   const result = await db.execute({ sql, args: [userId] });
   return result.rows as unknown as Todo[];
 }
 
 export async function getAllTodos(): Promise<Todo[]> {
-  const result = await db.execute('SELECT * FROM todos ORDER BY created_at DESC');
+  const result = await db.execute(
+    'SELECT * FROM todos ORDER BY created_at DESC',
+  );
   return result.rows as unknown as Todo[];
 }
 
-export async function updateTodo(id: string, updates: Partial<Pick<Todo, 'title' | 'data' | 'status' | 'priority' | 'due_date' | 'remind_at' | 'recurrence' | 'reminder_fired_at'>>): Promise<void> {
+export async function updateTodo(
+  id: string,
+  updates: Partial<
+    Pick<
+      Todo,
+      | 'title'
+      | 'data'
+      | 'status'
+      | 'priority'
+      | 'due_date'
+      | 'remind_at'
+      | 'recurrence'
+      | 'reminder_fired_at'
+    >
+  >,
+): Promise<void> {
   const fields: string[] = [];
   const values: unknown[] = [];
-  if (updates.title !== undefined) { fields.push('title = ?'); values.push(updates.title); }
-  if (updates.data !== undefined) { fields.push('data = ?'); values.push(updates.data); }
-  if (updates.status !== undefined) { fields.push('status = ?'); values.push(updates.status); }
-  if (updates.priority !== undefined) { fields.push('priority = ?'); values.push(updates.priority); }
-  if (updates.due_date !== undefined) { fields.push('due_date = ?'); values.push(updates.due_date); }
-  if (updates.remind_at !== undefined) { fields.push('remind_at = ?'); values.push(updates.remind_at); }
-  if (updates.recurrence !== undefined) { fields.push('recurrence = ?'); values.push(updates.recurrence); }
-  if (updates.reminder_fired_at !== undefined) { fields.push('reminder_fired_at = ?'); values.push(updates.reminder_fired_at); }
+  if (updates.title !== undefined) {
+    fields.push('title = ?');
+    values.push(updates.title);
+  }
+  if (updates.data !== undefined) {
+    fields.push('data = ?');
+    values.push(updates.data);
+  }
+  if (updates.status !== undefined) {
+    fields.push('status = ?');
+    values.push(updates.status);
+  }
+  if (updates.priority !== undefined) {
+    fields.push('priority = ?');
+    values.push(updates.priority);
+  }
+  if (updates.due_date !== undefined) {
+    fields.push('due_date = ?');
+    values.push(updates.due_date);
+  }
+  if (updates.remind_at !== undefined) {
+    fields.push('remind_at = ?');
+    values.push(updates.remind_at);
+  }
+  if (updates.recurrence !== undefined) {
+    fields.push('recurrence = ?');
+    values.push(updates.recurrence);
+  }
+  if (updates.reminder_fired_at !== undefined) {
+    fields.push('reminder_fired_at = ?');
+    values.push(updates.reminder_fired_at);
+  }
   if (fields.length === 0) return;
   fields.push('updated_at = ?');
   values.push(new Date().toISOString());
   values.push(id);
-  await db.execute({ sql: `UPDATE todos SET ${fields.join(', ')} WHERE id = ?`, args: values as InValue[] });
+  await db.execute({
+    sql: `UPDATE todos SET ${fields.join(', ')} WHERE id = ?`,
+    args: values as InValue[],
+  });
 }
 
 export async function deleteTodo(id: string): Promise<void> {
@@ -782,64 +953,6 @@ export async function getDueTodoReminders(): Promise<Todo[]> {
     args: [now],
   });
   return result.rows as unknown as Todo[];
-}
-
-// --- Reminders CRUD ---
-
-export async function createReminder(reminder: Reminder): Promise<void> {
-  await db.execute({
-    sql: `INSERT INTO reminders (id, user_id, title, data, remind_at, recurrence, status, snoozed_until, created_by, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    args: [reminder.id, reminder.user_id, reminder.title, reminder.data ?? null, reminder.remind_at, reminder.recurrence ?? null, reminder.status, reminder.snoozed_until ?? null, reminder.created_by, reminder.created_at],
-  });
-}
-
-export async function getReminderById(id: string): Promise<Reminder | undefined> {
-  const result = await db.execute({ sql: 'SELECT * FROM reminders WHERE id = ?', args: [id] });
-  return (result.rows[0] ?? undefined) as unknown as Reminder | undefined;
-}
-
-export async function getRemindersByUser(userId: string): Promise<Reminder[]> {
-  const result = await db.execute({
-    sql: 'SELECT * FROM reminders WHERE user_id = ? AND status IN (\'active\', \'snoozed\') ORDER BY remind_at ASC',
-    args: [userId],
-  });
-  return result.rows as unknown as Reminder[];
-}
-
-export async function getAllReminders(): Promise<Reminder[]> {
-  const result = await db.execute('SELECT * FROM reminders ORDER BY remind_at ASC');
-  return result.rows as unknown as Reminder[];
-}
-
-export async function updateReminder(id: string, updates: Partial<Pick<Reminder, 'title' | 'data' | 'remind_at' | 'recurrence' | 'status' | 'snoozed_until'>>): Promise<void> {
-  const fields: string[] = [];
-  const values: unknown[] = [];
-  if (updates.title !== undefined) { fields.push('title = ?'); values.push(updates.title); }
-  if (updates.data !== undefined) { fields.push('data = ?'); values.push(updates.data); }
-  if (updates.remind_at !== undefined) { fields.push('remind_at = ?'); values.push(updates.remind_at); }
-  if (updates.recurrence !== undefined) { fields.push('recurrence = ?'); values.push(updates.recurrence); }
-  if (updates.status !== undefined) { fields.push('status = ?'); values.push(updates.status); }
-  if (updates.snoozed_until !== undefined) { fields.push('snoozed_until = ?'); values.push(updates.snoozed_until); }
-  if (fields.length === 0) return;
-  values.push(id);
-  await db.execute({ sql: `UPDATE reminders SET ${fields.join(', ')} WHERE id = ?`, args: values as InValue[] });
-}
-
-export async function deleteReminder(id: string): Promise<void> {
-  await db.execute({ sql: 'DELETE FROM reminders WHERE id = ?', args: [id] });
-}
-
-export async function getDueReminders(): Promise<Reminder[]> {
-  const now = new Date().toISOString();
-  const result = await db.execute({
-    sql: `SELECT * FROM reminders WHERE status = 'active' AND remind_at <= ?
-      UNION ALL
-      SELECT * FROM reminders WHERE status = 'snoozed' AND snoozed_until IS NOT NULL AND snoozed_until <= ?
-      ORDER BY remind_at`,
-    args: [now, now],
-  });
-  return result.rows as unknown as Reminder[];
 }
 
 // --- Router state accessors ---
@@ -1220,13 +1333,22 @@ export async function getAllDashboardTokens(): Promise<DashboardTokenRow[]> {
   return result.rows as unknown as DashboardTokenRow[];
 }
 
-export async function updateDashboardToken(token: string, updates: { reminder_group_jid?: string | null }): Promise<void> {
+export async function updateDashboardToken(
+  token: string,
+  updates: { reminder_group_jid?: string | null },
+): Promise<void> {
   const fields: string[] = [];
   const values: unknown[] = [];
-  if (updates.reminder_group_jid !== undefined) { fields.push('reminder_group_jid = ?'); values.push(updates.reminder_group_jid); }
+  if (updates.reminder_group_jid !== undefined) {
+    fields.push('reminder_group_jid = ?');
+    values.push(updates.reminder_group_jid);
+  }
   if (fields.length === 0) return;
   values.push(token);
-  await db.execute({ sql: `UPDATE dashboard_tokens SET ${fields.join(', ')} WHERE token = ?`, args: values as InValue[] });
+  await db.execute({
+    sql: `UPDATE dashboard_tokens SET ${fields.join(', ')} WHERE token = ?`,
+    args: values as InValue[],
+  });
 }
 
 export async function deleteDashboardToken(token: string): Promise<void> {
@@ -1271,16 +1393,18 @@ export async function recordTokenUsage(
     cache_read_input_tokens: number;
     output_tokens: number;
   },
+  sessionMode: 'stateful' | 'stateless' = 'stateful',
 ): Promise<void> {
   await db.execute({
-    sql: `INSERT INTO token_usage (group_folder, input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens, recorded_at)
-          VALUES (?, ?, ?, ?, ?, ?)`,
+    sql: `INSERT INTO token_usage (group_folder, input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens, session_mode, recorded_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
     args: [
       groupFolder,
       usage.input_tokens,
       usage.cache_creation_input_tokens,
       usage.cache_read_input_tokens,
       usage.output_tokens,
+      sessionMode,
       new Date().toISOString(),
     ],
   });
@@ -1294,11 +1418,17 @@ export interface TokenUsageSummary {
   total_output: number;
   total_tokens: number;
   turn_count: number;
+  stateful_tokens: number;
+  stateless_tokens: number;
+  stateful_turns: number;
+  stateless_turns: number;
 }
 
 export async function getTokenUsageSummary(
   groupFolder?: string,
   sinceDays?: number,
+  since?: string,
+  until?: string,
 ): Promise<TokenUsageSummary[]> {
   let sql = `SELECT group_folder,
     SUM(input_tokens) as total_input,
@@ -1306,7 +1436,11 @@ export async function getTokenUsageSummary(
     SUM(cache_read_tokens) as total_cache_read,
     SUM(output_tokens) as total_output,
     SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as total_tokens,
-    COUNT(*) as turn_count
+    COUNT(*) as turn_count,
+    SUM(CASE WHEN session_mode = 'stateful' OR session_mode IS NULL THEN input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens ELSE 0 END) as stateful_tokens,
+    SUM(CASE WHEN session_mode = 'stateless' THEN input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens ELSE 0 END) as stateless_tokens,
+    SUM(CASE WHEN session_mode = 'stateful' OR session_mode IS NULL THEN 1 ELSE 0 END) as stateful_turns,
+    SUM(CASE WHEN session_mode = 'stateless' THEN 1 ELSE 0 END) as stateless_turns
     FROM token_usage WHERE 1=1`;
   const args: InValue[] = [];
 
@@ -1314,10 +1448,18 @@ export async function getTokenUsageSummary(
     sql += ' AND group_folder = ?';
     args.push(groupFolder);
   }
-  if (sinceDays) {
-    const since = new Date(Date.now() - sinceDays * 86400000).toISOString();
+  if (since) {
     sql += ' AND recorded_at >= ?';
     args.push(since);
+  }
+  if (until) {
+    sql += ' AND recorded_at < ?';
+    args.push(until);
+  }
+  if (sinceDays && !since) {
+    const sinceDate = new Date(Date.now() - sinceDays * 86400000).toISOString();
+    sql += ' AND recorded_at >= ?';
+    args.push(sinceDate);
   }
 
   sql += ' GROUP BY group_folder ORDER BY total_tokens DESC';
@@ -1331,5 +1473,196 @@ export async function getTokenUsageSummary(
     total_output: Number(r.total_output) || 0,
     total_tokens: Number(r.total_tokens) || 0,
     turn_count: Number(r.turn_count) || 0,
+    stateful_tokens: Number(r.stateful_tokens) || 0,
+    stateless_tokens: Number(r.stateless_tokens) || 0,
+    stateful_turns: Number(r.stateful_turns) || 0,
+    stateless_turns: Number(r.stateless_turns) || 0,
   }));
+}
+
+// --- Email Rules ---
+
+import type { EmailRule } from './types.js';
+
+export async function createEmailRule(
+  rule: Omit<EmailRule, 'id' | 'created_at' | 'updated_at'>,
+): Promise<EmailRule> {
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await db.execute({
+    sql: `INSERT INTO email_rules (id, name, priority, from_pattern, subject_pattern, body_pattern, action, target_group, extract_prompt, enabled, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [
+      id, rule.name, rule.priority, rule.from_pattern, rule.subject_pattern,
+      rule.body_pattern, rule.action, rule.target_group, rule.extract_prompt || '',
+      rule.enabled ? 1 : 0, now, now,
+    ],
+  });
+  return { ...rule, id, created_at: now, updated_at: now };
+}
+
+export async function getEmailRules(): Promise<EmailRule[]> {
+  const result = await db.execute(
+    'SELECT * FROM email_rules ORDER BY priority ASC, created_at ASC',
+  );
+  return result.rows.map(rowToEmailRule);
+}
+
+export async function getEnabledEmailRules(): Promise<EmailRule[]> {
+  const result = await db.execute(
+    'SELECT * FROM email_rules WHERE enabled = 1 ORDER BY priority ASC',
+  );
+  return result.rows.map(rowToEmailRule);
+}
+
+export async function updateEmailRule(
+  id: string,
+  updates: Partial<Omit<EmailRule, 'id' | 'created_at' | 'updated_at'>>,
+): Promise<void> {
+  const fields: string[] = [];
+  const args: InValue[] = [];
+  for (const [key, value] of Object.entries(updates)) {
+    const col = key === 'enabled' ? 'enabled' : key;
+    fields.push(`${col} = ?`);
+    args.push(key === 'enabled' ? (value ? 1 : 0) : (value as InValue));
+  }
+  fields.push('updated_at = ?');
+  args.push(new Date().toISOString());
+  args.push(id);
+  await db.execute({
+    sql: `UPDATE email_rules SET ${fields.join(', ')} WHERE id = ?`,
+    args,
+  });
+}
+
+export async function deleteEmailRule(id: string): Promise<void> {
+  await db.execute({ sql: 'DELETE FROM email_rules WHERE id = ?', args: [id] });
+}
+
+function rowToEmailRule(row: Record<string, unknown>): EmailRule {
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    priority: Number(row.priority) || 0,
+    from_pattern: (row.from_pattern as string) || '',
+    subject_pattern: (row.subject_pattern as string) || '',
+    body_pattern: (row.body_pattern as string) || '',
+    action: (row.action as EmailRule['action']) || 'forward',
+    target_group: (row.target_group as string) || '',
+    command_name: (row.command_name as string) || '',
+    extract_prompt: (row.extract_prompt as string) || '',
+    enabled: row.enabled === 1 || row.enabled === true,
+    created_at: row.created_at as string,
+    updated_at: row.updated_at as string,
+  };
+}
+
+// --- Email Log ---
+
+export interface EmailLogEntry {
+  id: string;
+  message_id: string;
+  thread_id: string;
+  from_address: string;
+  subject: string;
+  rule_id: string | null;
+  rule_name: string | null;
+  action: string;
+  target_group: string | null;
+  summary: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  processed_at: string;
+}
+
+export async function logEmail(entry: Omit<EmailLogEntry, 'id'>): Promise<void> {
+  await db.execute({
+    sql: `INSERT INTO email_log (sender, message_id, thread_id, from_address, subject, rule_id, rule_name, action, target_group, summary, input_tokens, output_tokens, processed_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [
+      entry.from_address || 'unknown', entry.message_id, entry.thread_id || '', entry.from_address, entry.subject,
+      entry.rule_id || null, entry.rule_name || null, entry.action,
+      entry.target_group || null, entry.summary || null,
+      entry.input_tokens, entry.output_tokens, entry.processed_at,
+    ],
+  });
+}
+
+export async function getEmailLog(limit = 50, offset = 0): Promise<EmailLogEntry[]> {
+  const result = await db.execute({
+    sql: 'SELECT * FROM email_log ORDER BY processed_at DESC LIMIT ? OFFSET ?',
+    args: [limit, offset],
+  });
+  return result.rows.map((r) => ({
+    id: r.id as string,
+    message_id: r.message_id as string,
+    thread_id: (r.thread_id as string) || '',
+    from_address: r.from_address as string,
+    subject: r.subject as string,
+    rule_id: (r.rule_id as string) || null,
+    rule_name: (r.rule_name as string) || null,
+    action: r.action as string,
+    target_group: (r.target_group as string) || null,
+    summary: (r.summary as string) || null,
+    input_tokens: Number(r.input_tokens) || 0,
+    output_tokens: Number(r.output_tokens) || 0,
+    processed_at: r.processed_at as string,
+  }));
+}
+
+// --- Agent Alerts ---
+
+export interface AgentAlert {
+  id: number;
+  group_folder: string;
+  group_name: string;
+  type: string;
+  message: string;
+  duration_ms: number | null;
+  num_turns: number | null;
+  cost_usd: number | null;
+  context_percent: number | null;
+  created_at: string;
+  dismissed: boolean;
+}
+
+export async function insertAlert(alert: Omit<AgentAlert, 'id' | 'dismissed'>): Promise<number> {
+  const result = await db.execute({
+    sql: `INSERT INTO agent_alerts (group_folder, group_name, type, message, duration_ms, num_turns, cost_usd, context_percent, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [
+      alert.group_folder, alert.group_name, alert.type, alert.message,
+      alert.duration_ms ?? null, alert.num_turns ?? null,
+      alert.cost_usd ?? null, alert.context_percent ?? null,
+      alert.created_at,
+    ],
+  });
+  return Number(result.lastInsertRowid);
+}
+
+export async function getAlerts(limit = 100): Promise<AgentAlert[]> {
+  const result = await db.execute({
+    sql: 'SELECT * FROM agent_alerts WHERE dismissed = 0 ORDER BY created_at DESC LIMIT ?',
+    args: [limit],
+  });
+  return result.rows.map((r) => ({
+    id: Number(r.id),
+    group_folder: r.group_folder as string,
+    group_name: r.group_name as string,
+    type: r.type as string,
+    message: r.message as string,
+    duration_ms: r.duration_ms != null ? Number(r.duration_ms) : null,
+    num_turns: r.num_turns != null ? Number(r.num_turns) : null,
+    cost_usd: r.cost_usd != null ? Number(r.cost_usd) : null,
+    context_percent: r.context_percent != null ? Number(r.context_percent) : null,
+    created_at: r.created_at as string,
+    dismissed: Boolean(r.dismissed),
+  }));
+}
+
+export async function dismissAlert(id: number): Promise<void> {
+  await db.execute({
+    sql: 'UPDATE agent_alerts SET dismissed = 1 WHERE id = ?',
+    args: [id],
+  });
 }

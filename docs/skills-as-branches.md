@@ -4,7 +4,7 @@
 
 This document covers **feature skills** — skills that add capabilities via git branch merges. This is the most complex skill type and the primary way NanoClaw is extended.
 
-NanoClaw has four types of skills overall. See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full taxonomy:
+NanoClaw has four types of skills overall. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxonomy:
 
 | Type | Location | How it works |
 |------|----------|-------------|
@@ -323,7 +323,7 @@ Standard fork contribution workflow. Their custom changes stay on their main and
 
 ## Contributing a Skill
 
-The flow below is for **feature skills** (branch-based). For utility skills (self-contained tools) and container skills, the contributor opens a PR that adds files directly to `.claude/skills/<name>/` or `container/skills/<name>/` — no branch extraction needed. See [CONTRIBUTING.md](../CONTRIBUTING.md) for all skill types.
+The flow below is for **feature skills** (branch-based). For utility skills (self-contained tools) and container skills, the contributor opens a PR that adds files directly to `.claude/skills/<name>/` or `container/skills/<name>/` — no branch extraction needed. See [CONTRIBUTING.md](CONTRIBUTING.md) for all skill types.
 
 ### Contributor flow (feature skills)
 

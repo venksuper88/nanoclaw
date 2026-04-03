@@ -42,14 +42,20 @@ export interface RegisteredGroup {
 }
 
 /** Check if a group's memoryUserId (possibly comma-separated) includes this userId */
-export function groupHasUser(memoryUserId: string | undefined, userId: string): boolean {
+export function groupHasUser(
+  memoryUserId: string | undefined,
+  userId: string,
+): boolean {
   const ids = (memoryUserId || 'venky').split(',').map((s) => s.trim());
   return ids.includes(userId);
 }
 
 /** Get all user IDs from a group's memoryUserId (possibly comma-separated) */
 export function getGroupUserIds(memoryUserId: string | undefined): string[] {
-  return (memoryUserId || 'venky').split(',').map((s) => s.trim()).filter(Boolean);
+  return (memoryUserId || 'venky')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /** Get the primary (first) user ID from a group's memoryUserId */
@@ -119,8 +125,9 @@ export interface EmailRule {
   from_pattern: string;
   subject_pattern: string;
   body_pattern: string;
-  action: 'forward' | 'archive' | 'discard';
-  target_group: string; // group folder name (for 'forward' action)
+  action: 'forward' | 'archive' | 'discard' | 'command';
+  target_group: string; // group folder name (for 'forward'/'command' actions)
+  command_name: string; // command to invoke (for 'command' action)
   extract_prompt: string; // optional Gemini extraction prompt (empty = default summarization)
   enabled: boolean;
   created_at: string;

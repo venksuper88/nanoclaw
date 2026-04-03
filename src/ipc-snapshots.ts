@@ -16,20 +16,23 @@ export interface AvailableGroup {
 
 export function writeTodosSnapshot(
   groupFolder: string,
-  todos: Array<{ id: string; user_id: string; title: string; data: string | null; status: string; priority: string; due_date: string | null; created_at: string }>,
+  todos: Array<{
+    id: string;
+    user_id: string;
+    title: string;
+    data: string | null;
+    status: string;
+    priority: string;
+    due_date: string | null;
+    created_at: string;
+  }>,
 ): void {
   const groupIpcDir = resolveGroupIpcPath(groupFolder);
   fs.mkdirSync(groupIpcDir, { recursive: true });
-  fs.writeFileSync(path.join(groupIpcDir, 'current_todos.json'), JSON.stringify(todos, null, 2));
-}
-
-export function writeRemindersSnapshot(
-  groupFolder: string,
-  reminders: Array<{ id: string; user_id: string; title: string; data: string | null; remind_at: string; recurrence: string | null; status: string; snoozed_until: string | null; created_at: string }>,
-): void {
-  const groupIpcDir = resolveGroupIpcPath(groupFolder);
-  fs.mkdirSync(groupIpcDir, { recursive: true });
-  fs.writeFileSync(path.join(groupIpcDir, 'current_reminders.json'), JSON.stringify(reminders, null, 2));
+  fs.writeFileSync(
+    path.join(groupIpcDir, 'current_todos.json'),
+    JSON.stringify(todos, null, 2),
+  );
 }
 
 export function writeTasksSnapshot(
@@ -63,6 +66,18 @@ export function writeTasksSnapshot(
  * Only main group can see all available groups (for activation).
  * Non-main groups only see their own registration status.
  */
+export function writeCommandsSnapshot(
+  groupFolder: string,
+  commands: Array<{ name: string; description: string }>,
+): void {
+  const groupIpcDir = resolveGroupIpcPath(groupFolder);
+  fs.mkdirSync(groupIpcDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(groupIpcDir, 'current_commands.json'),
+    JSON.stringify(commands, null, 2),
+  );
+}
+
 export function writeGroupsSnapshot(
   groupFolder: string,
   isMain: boolean,

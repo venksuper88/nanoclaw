@@ -52,8 +52,10 @@ export function TodosView() {
   const [priority, setPriority] = useState('medium');
   const [dueDate, setDueDate] = useState('');
   const [remindAt, setRemindAt] = useState('');
+  const [recurrence, setRecurrence] = useState('');
   const [showDuePicker, setShowDuePicker] = useState(false);
   const [showRemindPicker, setShowRemindPicker] = useState(false);
+  const [showRecurrencePicker, setShowRecurrencePicker] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -68,8 +70,8 @@ export function TodosView() {
   const openAdd = () => {
     setEditingId(null);
     setTitle(''); setData(''); setPriority('medium');
-    setDueDate(''); setRemindAt('');
-    setShowDuePicker(false); setShowRemindPicker(false);
+    setDueDate(''); setRemindAt(''); setRecurrence('');
+    setShowDuePicker(false); setShowRemindPicker(false); setShowRecurrencePicker(false);
     setShowDialog(true);
   };
 
@@ -80,8 +82,10 @@ export function TodosView() {
     setPriority(todo.priority);
     setDueDate(toLocalInput(todo.due_date));
     setRemindAt(toLocalInput(todo.remind_at));
+    setRecurrence(todo.recurrence || '');
     setShowDuePicker(!!todo.due_date);
     setShowRemindPicker(!!todo.remind_at);
+    setShowRecurrencePicker(!!todo.recurrence);
     setShowDialog(true);
   };
 
@@ -100,6 +104,7 @@ export function TodosView() {
         priority,
         due_date: dueDate ? new Date(dueDate).toISOString() : null,
         remind_at: remindAt ? new Date(remindAt).toISOString() : null,
+        recurrence: recurrence || null,
       });
     } else {
       // Add mode
@@ -109,6 +114,7 @@ export function TodosView() {
         priority,
         due_date: dueDate ? new Date(dueDate).toISOString() : undefined,
         ...(remindAt ? { remind_at: new Date(remindAt).toISOString() } : {}),
+        ...(recurrence ? { recurrence } : {}),
       } as any);
     }
     closeDialog();
@@ -126,14 +132,34 @@ export function TodosView() {
     load();
   };
 
-  const active = todos.filter(t => t.status !== 'done');
+  const getEarliestDate = (t: Todo): number | null => {
+    const dates = [t.due_date, t.remind_at].filter(Boolean).map(d => new Date(d!).getTime());
+    return dates.length > 0 ? Math.min(...dates) : null;
+  };
+
+  const active = todos
+    .filter(t => t.status !== 'done')
+    .sort((a, b) => {
+      const aDate = getEarliestDate(a);
+      const bDate = getEarliestDate(b);
+      // Dated items first (earliest first), then undated
+      if (aDate != null && bDate != null) return aDate - bDate;
+      if (aDate != null && bDate == null) return -1;
+      if (aDate == null && bDate != null) return 1;
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
   const completed = todos.filter(t => t.status === 'done');
+
+  const todayStr = new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
 
   return (
     <div className="td-view">
       {/* Header */}
       <div className="td-header">
-        <h2 className="td-title">Todos</h2>
+        <div>
+          <h2 className="td-title">Todos</h2>
+          <div className="td-date-subtitle">{todayStr}</div>
+        </div>
         <button className="td-refresh" onClick={load}>
           <span className="mi">refresh</span>
         </button>
@@ -170,6 +196,12 @@ export function TodosView() {
                       <span className={`td-badge ${new Date(todo.remind_at) <= new Date() ? 'td-badge-overdue' : 'td-badge-remind-upcoming'}`}>
                         <span className="mi" style={{ fontSize: 12 }}>notifications</span>
                         {fmtRelative(todo.remind_at)}
+                      </span>
+                    )}
+                    {todo.recurrence && (
+                      <span className="td-badge td-badge-recur">
+                        <span className="mi" style={{ fontSize: 12 }}>repeat</span>
+                        {todo.recurrence}
                       </span>
                     )}
                   </div>
@@ -287,6 +319,19 @@ export function TodosView() {
                     </span>
                   )}
                 </button>
+
+                <button
+                  className={`td-option-chip ${recurrence ? 'td-chip-active' : showRecurrencePicker ? 'td-chip-active' : 'td-chip-default'}`}
+                  onClick={() => { if (recurrence) { setRecurrence(''); setShowRecurrencePicker(false); } else { setShowRecurrencePicker(!showRecurrencePicker); } }}
+                >
+                  <span className="mi" style={{ fontSize: 16 }}>repeat</span>
+                  {recurrence ? recurrence.charAt(0).toUpperCase() + recurrence.slice(1) : 'Repeat'}
+                  {recurrence && (
+                    <span className="td-chip-clear" onClick={e => { e.stopPropagation(); setRecurrence(''); setShowRecurrencePicker(false); }}>
+                      <span className="mi" style={{ fontSize: 14 }}>close</span>
+                    </span>
+                  )}
+                </button>
               </div>
 
               {/* Inline pickers — appear below chips when toggled */}
@@ -295,6 +340,19 @@ export function TodosView() {
               )}
               {showRemindPicker && (
                 <input type="datetime-local" className="td-dialog-input td-dialog-input-sm" value={remindAt} onChange={e => setRemindAt(e.target.value)} autoFocus />
+              )}
+              {showRecurrencePicker && (
+                <div className="td-recurrence-options">
+                  {['daily', 'weekday', 'weekly', 'monthly', 'yearly'].map(opt => (
+                    <button
+                      key={opt}
+                      className={`td-recurrence-btn${recurrence === opt ? ' active' : ''}`}
+                      onClick={() => { setRecurrence(opt); setShowRecurrencePicker(false); }}
+                    >
+                      {opt.charAt(0).toUpperCase() + opt.slice(1)}
+                    </button>
+                  ))}
+                </div>
               )}
 
               {/* Notes */}

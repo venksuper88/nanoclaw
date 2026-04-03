@@ -18,6 +18,7 @@ const envConfig = readEnvFile([
   'VAPID_PUBLIC_KEY',
   'VAPID_PRIVATE_KEY',
   'VAPID_EMAIL',
+  'GEMINI_API_KEY',
 ]);
 
 export const ASSISTANT_NAME =
@@ -101,3 +102,7 @@ export const VAPID_PRIVATE_KEY =
   process.env.VAPID_PRIVATE_KEY || envConfig.VAPID_PRIVATE_KEY || '';
 export const VAPID_EMAIL =
   process.env.VAPID_EMAIL || envConfig.VAPID_EMAIL || '';
+
+// Gemini (content extraction)
+export const GEMINI_API_KEY =
+  process.env.GEMINI_API_KEY || envConfig.GEMINI_API_KEY || '';

@@ -1,5 +1,6 @@
 import http from 'http';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import express from 'express';
 import { Server as SocketIOServer } from 'socket.io';
@@ -13,6 +14,9 @@ import {
 } from './auth.js';
 import { dashboardEvents, type DashboardEventMap } from './events.js';
 import { createRouter } from './routes.js';
+import { Router } from 'express';
+import puppeteer from 'puppeteer';
+import { DASHBOARD_PORT } from '../config.js';
 
 const STATIC_DIR = path.resolve(process.cwd(), 'public', 'dashboard');
 
@@ -25,7 +29,9 @@ export async function startDashboard(
   app.use(express.json());
 
   // Auth middleware — resolve user from token, attach to request
+  // Exempt non-sensitive relay endpoints from auth (Chrome extension can't easily carry tokens)
   app.use('/api', async (req, res, next) => {
+    if (req.method === 'POST' && req.path === '/claude-usage') return next();
     const user = await getRequestUser(req);
     if (!user) {
       res.status(401).json({ ok: false, error: 'Unauthorized' });
@@ -36,7 +42,76 @@ export async function startDashboard(
     next();
   });
 
-  app.use(createRouter());
+  app.use(await createRouter());
+
+  // Finance sub-app static files
+  const FINANCE_DIR = path.join(process.cwd(), 'public', 'finance');
+  app.use(
+    '/finance',
+    express.static(FINANCE_DIR, {
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('index.html')) {
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        } else if (filePath.includes('/assets/')) {
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+      },
+    }),
+  );
+  // Finance SPA fallback — serve finance index.html for all /finance/* routes
+  app.get('/finance/{*path}', (_req, res) => {
+    const financeIndex = path.join(FINANCE_DIR, 'index.html');
+    if (fs.existsSync(financeIndex)) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.sendFile(financeIndex);
+    } else {
+      res.status(404).send('Finance app not found');
+    }
+  });
+
+  // Creatives sub-app static files
+  const CREATIVES_DIR = path.join(process.cwd(), 'public', 'creatives');
+  app.use(
+    '/creatives',
+    express.static(CREATIVES_DIR, {
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('index.html')) {
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        } else if (filePath.includes('/assets/')) {
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+      },
+    }),
+  );
+  // Creatives export API (loaded from ~/Projects/DevenCreativesPortal/)
+  try {
+    const creativesApiPath = path.resolve(os.homedir(), 'Projects', 'DevenCreativesPortal', 'dist', 'api', 'index.js');
+    if (fs.existsSync(creativesApiPath)) {
+      const { createCreativesRouter } = await import(creativesApiPath);
+      const creativesRouter = createCreativesRouter({
+        Router,
+        puppeteer,
+        dashboardPort: DASHBOARD_PORT,
+      });
+      app.use('/api/creatives', express.json({ limit: '20mb' }), creativesRouter);
+      logger.info('Creatives sub-app routes loaded from DevenCreativesPortal');
+    } else {
+      logger.warn({ creativesApiPath }, 'Creatives sub-app not found, creatives API disabled');
+    }
+  } catch (err) {
+    logger.error({ err }, 'Failed to load creatives sub-app routes');
+  }
+
+  // Creatives SPA fallback — serve creatives index.html for all /creatives/* routes
+  app.get('/creatives/{*path}', (_req, res) => {
+    const creativesIndex = path.join(CREATIVES_DIR, 'index.html');
+    if (fs.existsSync(creativesIndex)) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.sendFile(creativesIndex);
+    } else {
+      res.status(404).send('Creatives app not found');
+    }
+  });
 
   // Static files (SPA)
   // Serve hashed assets with long cache; index.html must never be cached so
@@ -121,6 +196,8 @@ export async function startDashboard(
     forward('task:complete');
     forward('context:update');
     forward('container:log');
+    forward('agent:stuck');
+    forward('agent:alert');
 
     // Re-emit agent:spawn for any groups currently being processed
     // so clients that reconnect (phone screen lock, background) catch up
