@@ -1,0 +1,28 @@
+[
+  {
+    "type": "FinancialTransaction",
+    "description": "Bank alerts, UPI payments, credit card transactions, EMI debits, mandates, refunds",
+    "classificationPrompt": "Classify as FinancialTransaction if the email is about money movement — debits, credits, refunds, reversals, mandates, subscriptions, EMIs, salary credits, or any bank/payment app notification about a financial transaction. Includes UPI, NEFT, IMPS, credit card statements, loan EMIs, and e-mandate registrations.",
+    "fields": {
+      "mandatory": {
+        "transactionType": "one of: debit, credit, refund, reversal, emi, mandate, subscription",
+        "amount": "numeric amount (0 if truly unknown)",
+        "currency": "e.g. INR, USD",
+        "transactionDateTime": "ISO 8601 format (use email date if transaction date not stated)"
+      },
+      "optional": {
+        "merchant": "payee/merchant name",
+        "accountNumber": "masked account/card number as shown in email",
+        "bankName": "bank or financial institution",
+        "referenceId": "UTR, reference number, order ID",
+        "upiId": "UPI VPA if applicable",
+        "cardLast4": "last 4 digits of card",
+        "status": "completed, pending, scheduled, failed",
+        "category": "food, travel, subscription, utility, transfer, salary, investment, insurance, loan, other",
+        "balanceAfter": "remaining balance if shown",
+        "description": "brief note from email context",
+        "isRecurring": "true/false"
+      }
+    }
+  }
+]
