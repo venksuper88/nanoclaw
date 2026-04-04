@@ -5,6 +5,8 @@ import { execFileSync } from 'child_process';
 
 import { GEMINI_API_KEY } from './config.js';
 import { logger } from './logger.js';
+import type { EmailClassification } from './types.js';
+import { loadEmailSchemas, buildClassificationPrompt } from './email-schemas.js';
 
 const MODEL = 'gemini-2.5-flash';
 
@@ -68,6 +70,68 @@ Summary: <1-2 sentence plain English summary. For e-mandate/upcoming debits, cle
     };
   } catch (err) {
     logger.error({ err, subject }, 'Gemini email extraction failed');
+    return null;
+  }
+}
+
+// --- Structured email classification & extraction ---
+
+export interface ClassificationResult {
+  classification: EmailClassification;
+  inputTokens: number;
+  outputTokens: number;
+  model: string;
+}
+
+/**
+ * Classify and extract structured data from an email via Gemini.
+ * Dynamically builds the prompt from registered email schemas.
+ * Falls back to null on failure or if no schemas are registered.
+ */
+export async function classifyEmail(
+  sender: string,
+  subject: string,
+  body: string,
+): Promise<ClassificationResult | null> {
+  const client = getClient();
+  if (!client) return null;
+
+  const schemas = loadEmailSchemas();
+  if (schemas.length === 0) {
+    logger.debug('No email schemas registered, skipping classification');
+    return null;
+  }
+
+  const classificationPrompt = buildClassificationPrompt(schemas);
+  const knownTypes = new Set(schemas.map((s) => s.type));
+
+  const prompt = `${classificationPrompt}\n\nEmail from: ${sender}\nSubject: ${subject}\n\n${body}`;
+
+  try {
+    const model = client.getGenerativeModel({
+      model: MODEL,
+      generationConfig: { responseMimeType: 'application/json' },
+    });
+    const result = await model.generateContent(prompt);
+    const response = result.response;
+    const text = response.text();
+    const usage = response.usageMetadata;
+
+    const parsed = JSON.parse(text) as EmailClassification;
+
+    // Validate emailType is a known registered type or "Other"
+    if (parsed.emailType !== 'Other' && !knownTypes.has(parsed.emailType)) {
+      parsed.emailType = 'Other';
+    }
+
+    return {
+      classification: parsed,
+      inputTokens: usage?.promptTokenCount || 0,
+      outputTokens: usage?.candidatesTokenCount || 0,
+      model: MODEL,
+    };
+  } catch (err) {
+    logger.error({ err, subject }, 'Gemini email classification failed');
     return null;
   }
 }

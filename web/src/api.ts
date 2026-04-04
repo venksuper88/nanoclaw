@@ -70,6 +70,7 @@ export interface EmailRule {
   from_pattern: string;
   subject_pattern: string;
   body_pattern: string;
+  email_type_pattern: string;
   action: 'forward' | 'archive' | 'discard' | 'command';
   target_group: string;
   command_name: string;
@@ -93,6 +94,8 @@ export interface EmailLogEntry {
   input_tokens: number;
   output_tokens: number;
   processed_at: string;
+  email_type: string | null;
+  structured_data: string | null;
 }
 
 export const api = {
@@ -224,7 +227,9 @@ export const api = {
   getMcpServers: () =>
     request<ApiResponse<Array<{ name: string; type: string }>>>('/api/mcp-servers'),
 
-  // Email rules
+  // Email types & rules
+  getEmailTypes: () =>
+    request<ApiResponse<string[]>>('/api/email-types'),
   getEmailRules: () =>
     request<ApiResponse<EmailRule[]>>('/api/email-rules'),
   createEmailRule: (rule: Omit<EmailRule, 'id' | 'created_at' | 'updated_at'>) =>

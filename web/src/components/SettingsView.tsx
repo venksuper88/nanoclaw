@@ -39,6 +39,7 @@ interface EmailRuleRow {
   from_pattern: string;
   subject_pattern: string;
   body_pattern: string;
+  email_type_pattern: string;
   action: string;
   target_group: string;
   command_name: string;
@@ -47,6 +48,8 @@ interface EmailRuleRow {
   created_at: string;
   updated_at: string;
 }
+
+// Email types loaded dynamically from registered schemas
 
 export function SettingsView({ groups }: { groups: Group[] }) {
   const [section, setSection] = useState<'groups' | 'tokens' | 'mem0' | 'email'>('groups');
@@ -76,12 +79,13 @@ export function SettingsView({ groups }: { groups: Group[] }) {
   const [newScopeDesc, setNewScopeDesc] = useState('');
 
   // Email rules state
+  const [emailTypes, setEmailTypes] = useState<string[]>(['Other']);
   const [emailRules, setEmailRules] = useState<EmailRuleRow[]>([]);
-  const [emailLog, setEmailLog] = useState<Array<{ sender: string; subject: string; rule_name: string | null; action: string; target_group: string | null; processed_at: string }>>([]);
+  const [emailLog, setEmailLog] = useState<Array<{ sender: string; subject: string; rule_name: string | null; action: string; target_group: string | null; processed_at: string; email_type: string | null }>>([]);
   const [extractionStats, setExtractionStats] = useState<{ today: { calls: number; input_tokens: number; output_tokens: number }; week: { calls: number; input_tokens: number; output_tokens: number }; total: { calls: number; input_tokens: number; output_tokens: number }; byType: Record<string, number> } | null>(null);
   const [showRuleCreate, setShowRuleCreate] = useState(false);
   const [editingRule, setEditingRule] = useState<string | null>(null);
-  const [ruleForm, setRuleForm] = useState({ name: '', priority: 100, from_pattern: '', subject_pattern: '', body_pattern: '', action: 'forward' as 'forward' | 'archive' | 'discard' | 'command', target_group: '', command_name: '', extract_prompt: '', enabled: true });
+  const [ruleForm, setRuleForm] = useState({ name: '', priority: 100, from_pattern: '', subject_pattern: '', body_pattern: '', email_type_pattern: '', action: 'forward' as 'forward' | 'archive' | 'discard' | 'command', target_group: '', command_name: '', extract_prompt: '', enabled: true });
 
   // Move-to-shared state
   const [movingMemory, setMovingMemory] = useState<string | null>(null);
@@ -106,6 +110,7 @@ export function SettingsView({ groups }: { groups: Group[] }) {
   // Load email rules
   useEffect(() => {
     if (section !== 'email' || !isOwner) return;
+    api.getEmailTypes().then(r => { if (r.ok) setEmailTypes(r.data); }).catch(() => {});
     api.getEmailRules().then(r => { if (r.ok) setEmailRules(r.data); }).catch(() => {});
     api.getEmailLog().then(r => { if (r.ok) setEmailLog(r.data); }).catch(() => {});
     api.getExtractionStats().then(r => { if (r.ok) setExtractionStats(r.data); }).catch(() => {});
@@ -503,7 +508,7 @@ export function SettingsView({ groups }: { groups: Group[] }) {
           <div style={{ padding: '0 16px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div className="section-label" style={{ padding: 0 }}>Email Routing Rules</div>
             <button className="btn btn-sm btn-blue" onClick={() => {
-              setRuleForm({ name: '', priority: (emailRules.length + 1) * 10, from_pattern: '', subject_pattern: '', body_pattern: '', action: 'forward', target_group: '', command_name: '', extract_prompt: '', enabled: true });
+              setRuleForm({ name: '', priority: (emailRules.length + 1) * 10, from_pattern: '', subject_pattern: '', body_pattern: '', email_type_pattern: '', action: 'forward', target_group: '', command_name: '', extract_prompt: '', enabled: true });
               setShowRuleCreate(!showRuleCreate);
               setEditingRule(null);
             }}>
@@ -539,6 +544,24 @@ export function SettingsView({ groups }: { groups: Group[] }) {
               <div style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Body Contains (keyword)</label>
                 <input value={ruleForm.body_pattern} onChange={e => setRuleForm(f => ({ ...f, body_pattern: e.target.value }))} placeholder="optional keyword in body" style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '0.5px solid var(--separator)', background: 'var(--input-bg)', color: 'var(--text)', fontSize: 13 }} />
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Email Type (empty = any type)</label>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {emailTypes.map(type => {
+                    const selected = ruleForm.email_type_pattern.split(',').map(t => t.trim()).filter(Boolean);
+                    const isSelected = selected.includes(type);
+                    return (
+                      <button key={type} className={`btn btn-sm ${isSelected ? 'btn-blue' : 'btn-outline'}`} onClick={() => {
+                        const next = isSelected ? selected.filter(t => t !== type) : [...selected, type];
+                        setRuleForm(f => ({ ...f, email_type_pattern: next.join(',') }));
+                      }}>
+                        {type}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 3 }}>Select which email types this rule matches. Combined with pattern filters below.</div>
               </div>
               {ruleForm.action === 'forward' && (
                 <div style={{ marginBottom: 10 }}>
@@ -602,11 +625,13 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                     <span className="badge" style={{ fontSize: 9, background: 'var(--bg)' }}>#{rule.priority}</span>
                   </div>
                   <div className="list-subtitle">
+                    {rule.email_type_pattern && `type: ${rule.email_type_pattern}`}
+                    {rule.email_type_pattern && (rule.from_pattern || rule.subject_pattern || rule.body_pattern) && ' · '}
                     {rule.from_pattern && `from: ${rule.from_pattern}`}
                     {rule.from_pattern && rule.subject_pattern && ' · '}
                     {rule.subject_pattern && `subj: ${rule.subject_pattern}`}
                     {rule.body_pattern && ` · body: "${rule.body_pattern}"`}
-                    {!rule.from_pattern && !rule.subject_pattern && !rule.body_pattern && 'matches all emails'}
+                    {!rule.from_pattern && !rule.subject_pattern && !rule.body_pattern && !rule.email_type_pattern && 'matches all emails'}
                     {rule.action === 'forward' && ` → ${groups.find(g => g.folder === rule.target_group)?.name || rule.target_group}`}
                   </div>
                 </div>
@@ -618,7 +643,7 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                     {rule.enabled ? 'Disable' : 'Enable'}
                   </button>
                   <button className="btn btn-sm btn-outline" onClick={() => {
-                    setRuleForm({ name: rule.name, priority: rule.priority, from_pattern: rule.from_pattern, subject_pattern: rule.subject_pattern, body_pattern: rule.body_pattern, action: rule.action as any, target_group: rule.target_group, command_name: (rule as any).command_name || '', extract_prompt: rule.extract_prompt || '', enabled: rule.enabled });
+                    setRuleForm({ name: rule.name, priority: rule.priority, from_pattern: rule.from_pattern, subject_pattern: rule.subject_pattern, body_pattern: rule.body_pattern, email_type_pattern: rule.email_type_pattern || '', action: rule.action as any, target_group: rule.target_group, command_name: (rule as any).command_name || '', extract_prompt: rule.extract_prompt || '', enabled: rule.enabled });
                     setEditingRule(rule.id);
                     setShowRuleCreate(false);
                   }}>
@@ -659,6 +684,7 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                   </div>
                   <div className="list-subtitle" style={{ fontSize: 11 }}>
                     {entry.sender}
+                    {entry.email_type ? ` · ${entry.email_type}` : ''}
                     {entry.rule_name ? ` · rule: ${entry.rule_name}` : ' · no match'}
                     {entry.target_group ? ` → ${groups.find(g => g.folder === entry.target_group)?.name || entry.target_group}` : ''}
                     {' · '}{fmtDate(entry.processed_at)}

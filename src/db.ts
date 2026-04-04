@@ -337,13 +337,15 @@ async function createSchema(database: Client): Promise<void> {
       updated_at TEXT NOT NULL
     )
   `);
-  // Migration: add command_name to existing email_rules
-  try {
-    await database.execute(
-      `ALTER TABLE email_rules ADD COLUMN command_name TEXT NOT NULL DEFAULT ''`,
-    );
-  } catch {
-    /* column already exists */
+  // Migrations: add columns to existing email_rules
+  for (const col of ['command_name', 'email_type_pattern']) {
+    try {
+      await database.execute(
+        `ALTER TABLE email_rules ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`,
+      );
+    } catch {
+      /* column already exists */
+    }
   }
   await database.execute(
     `CREATE INDEX IF NOT EXISTS idx_email_rules_priority ON email_rules(priority)`,
@@ -382,6 +384,8 @@ async function createSchema(database: Client): Promise<void> {
     { col: 'summary', type: 'TEXT', dflt: 'NULL' },
     { col: 'input_tokens', type: 'INTEGER', dflt: '0' },
     { col: 'output_tokens', type: 'INTEGER', dflt: '0' },
+    { col: 'email_type', type: 'TEXT', dflt: 'NULL' },
+    { col: 'structured_data', type: 'TEXT', dflt: 'NULL' },
   ];
   for (const m of migrations) {
     if (!colNames.has(m.col)) {
@@ -1490,12 +1494,22 @@ export async function createEmailRule(
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await db.execute({
-    sql: `INSERT INTO email_rules (id, name, priority, from_pattern, subject_pattern, body_pattern, action, target_group, extract_prompt, enabled, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    sql: `INSERT INTO email_rules (id, name, priority, from_pattern, subject_pattern, body_pattern, email_type_pattern, action, target_group, extract_prompt, enabled, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
-      id, rule.name, rule.priority, rule.from_pattern, rule.subject_pattern,
-      rule.body_pattern, rule.action, rule.target_group, rule.extract_prompt || '',
-      rule.enabled ? 1 : 0, now, now,
+      id,
+      rule.name,
+      rule.priority,
+      rule.from_pattern,
+      rule.subject_pattern,
+      rule.body_pattern,
+      rule.email_type_pattern || '',
+      rule.action,
+      rule.target_group,
+      rule.extract_prompt || '',
+      rule.enabled ? 1 : 0,
+      now,
+      now,
     ],
   });
   return { ...rule, id, created_at: now, updated_at: now };
@@ -1547,6 +1561,7 @@ function rowToEmailRule(row: Record<string, unknown>): EmailRule {
     from_pattern: (row.from_pattern as string) || '',
     subject_pattern: (row.subject_pattern as string) || '',
     body_pattern: (row.body_pattern as string) || '',
+    email_type_pattern: (row.email_type_pattern as string) || '',
     action: (row.action as EmailRule['action']) || 'forward',
     target_group: (row.target_group as string) || '',
     command_name: (row.command_name as string) || '',
@@ -1573,22 +1588,40 @@ export interface EmailLogEntry {
   input_tokens: number;
   output_tokens: number;
   processed_at: string;
+  email_type: string | null;
+  structured_data: string | null; // JSON string of typed extraction data
 }
 
-export async function logEmail(entry: Omit<EmailLogEntry, 'id'>): Promise<void> {
+export async function logEmail(
+  entry: Omit<EmailLogEntry, 'id'>,
+): Promise<void> {
   await db.execute({
-    sql: `INSERT INTO email_log (sender, message_id, thread_id, from_address, subject, rule_id, rule_name, action, target_group, summary, input_tokens, output_tokens, processed_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    sql: `INSERT INTO email_log (sender, message_id, thread_id, from_address, subject, rule_id, rule_name, action, target_group, summary, input_tokens, output_tokens, processed_at, email_type, structured_data)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
-      entry.from_address || 'unknown', entry.message_id, entry.thread_id || '', entry.from_address, entry.subject,
-      entry.rule_id || null, entry.rule_name || null, entry.action,
-      entry.target_group || null, entry.summary || null,
-      entry.input_tokens, entry.output_tokens, entry.processed_at,
+      entry.from_address || 'unknown',
+      entry.message_id,
+      entry.thread_id || '',
+      entry.from_address,
+      entry.subject,
+      entry.rule_id || null,
+      entry.rule_name || null,
+      entry.action,
+      entry.target_group || null,
+      entry.summary || null,
+      entry.input_tokens,
+      entry.output_tokens,
+      entry.processed_at,
+      entry.email_type || null,
+      entry.structured_data || null,
     ],
   });
 }
 
-export async function getEmailLog(limit = 50, offset = 0): Promise<EmailLogEntry[]> {
+export async function getEmailLog(
+  limit = 50,
+  offset = 0,
+): Promise<EmailLogEntry[]> {
   const result = await db.execute({
     sql: 'SELECT * FROM email_log ORDER BY processed_at DESC LIMIT ? OFFSET ?',
     args: [limit, offset],
@@ -1607,6 +1640,8 @@ export async function getEmailLog(limit = 50, offset = 0): Promise<EmailLogEntry
     input_tokens: Number(r.input_tokens) || 0,
     output_tokens: Number(r.output_tokens) || 0,
     processed_at: r.processed_at as string,
+    email_type: (r.email_type as string) || null,
+    structured_data: (r.structured_data as string) || null,
   }));
 }
 
@@ -1626,14 +1661,21 @@ export interface AgentAlert {
   dismissed: boolean;
 }
 
-export async function insertAlert(alert: Omit<AgentAlert, 'id' | 'dismissed'>): Promise<number> {
+export async function insertAlert(
+  alert: Omit<AgentAlert, 'id' | 'dismissed'>,
+): Promise<number> {
   const result = await db.execute({
     sql: `INSERT INTO agent_alerts (group_folder, group_name, type, message, duration_ms, num_turns, cost_usd, context_percent, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
-      alert.group_folder, alert.group_name, alert.type, alert.message,
-      alert.duration_ms ?? null, alert.num_turns ?? null,
-      alert.cost_usd ?? null, alert.context_percent ?? null,
+      alert.group_folder,
+      alert.group_name,
+      alert.type,
+      alert.message,
+      alert.duration_ms ?? null,
+      alert.num_turns ?? null,
+      alert.cost_usd ?? null,
+      alert.context_percent ?? null,
       alert.created_at,
     ],
   });
@@ -1654,7 +1696,8 @@ export async function getAlerts(limit = 100): Promise<AgentAlert[]> {
     duration_ms: r.duration_ms != null ? Number(r.duration_ms) : null,
     num_turns: r.num_turns != null ? Number(r.num_turns) : null,
     cost_usd: r.cost_usd != null ? Number(r.cost_usd) : null,
-    context_percent: r.context_percent != null ? Number(r.context_percent) : null,
+    context_percent:
+      r.context_percent != null ? Number(r.context_percent) : null,
     created_at: r.created_at as string,
     dismissed: Boolean(r.dismissed),
   }));

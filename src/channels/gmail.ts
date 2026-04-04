@@ -14,7 +14,7 @@ import {
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
-import { extractEmail } from '../extraction.js';
+import { extractEmail, classifyEmail } from '../extraction.js';
 import { getEnabledEmailRules, logEmail } from '../db.js';
 import { runCommand, resolveCommand } from '../commands.js';
 
@@ -102,7 +102,10 @@ export class GmailChannel implements Channel {
             )
           : this.pollIntervalMs;
       if (this.consecutiveErrors > 0) {
-        logger.info({ consecutiveErrors: this.consecutiveErrors, nextPollMs: backoffMs }, 'Gmail polling with backoff');
+        logger.info(
+          { consecutiveErrors: this.consecutiveErrors, nextPollMs: backoffMs },
+          'Gmail polling with backoff',
+        );
       }
       this.pollTimer = setTimeout(() => {
         this.pollForMessages()
@@ -208,7 +211,10 @@ export class GmailChannel implements Channel {
       );
 
       if (newMessages.length > 0) {
-        logger.info({ total: messages.length, new: newMessages.length }, 'Gmail poll: new messages');
+        logger.info(
+          { total: messages.length, new: newMessages.length },
+          'Gmail poll: new messages',
+        );
       } else {
         logger.debug({ total: messages.length }, 'Gmail poll: no new messages');
       }
@@ -218,7 +224,10 @@ export class GmailChannel implements Channel {
         try {
           await this.processMessage(stub.id!);
         } catch (err) {
-          logger.error({ err, messageId: stub.id }, 'Gmail processMessage failed');
+          logger.error(
+            { err, messageId: stub.id },
+            'Gmail processMessage failed',
+          );
         }
       }
 
@@ -236,7 +245,11 @@ export class GmailChannel implements Channel {
         5 * 60 * 1000,
       );
       logger.error(
-        { err, consecutiveErrors: this.consecutiveErrors, nextPollMs: backoffMs },
+        {
+          err,
+          consecutiveErrors: this.consecutiveErrors,
+          nextPollMs: backoffMs,
+        },
         'Gmail poll failed',
       );
     }
@@ -300,14 +313,15 @@ export class GmailChannel implements Channel {
     this.opts.onChatMetadata(chatJid, timestamp, subject, 'gmail', false);
 
     // Evaluate email rules
-    const { targetJid, content, action, matchedRule } = await this.evaluateRules(
-      senderEmail,
-      senderName,
-      subject,
-      body,
-      messageId,
-      threadId,
-    );
+    const { targetJid, content, action, matchedRule } =
+      await this.evaluateRules(
+        senderEmail,
+        senderName,
+        subject,
+        body,
+        messageId,
+        threadId,
+      );
 
     // Execute action
     if (action === 'discard') {
@@ -332,7 +346,9 @@ export class GmailChannel implements Channel {
       // Execute command directly — pass full email extraction as input
       const groups = this.opts.registeredGroups();
       const targetFolder = matchedRule.target_group;
-      const groupEntry = Object.entries(groups).find(([, g]) => g.folder === targetFolder);
+      const groupEntry = Object.entries(groups).find(
+        ([, g]) => g.folder === targetFolder,
+      );
       const groupJid = groupEntry ? groupEntry[0] : targetJid;
 
       if (resolveCommand(matchedRule.command_name, targetFolder)) {
@@ -363,10 +379,20 @@ export class GmailChannel implements Channel {
             messageId,
           },
           sendMessage: sendMsg,
-        }).catch((err) => logger.error({ err, commandName: matchedRule!.command_name }, 'Email command execution failed'));
+        }).catch((err) =>
+          logger.error(
+            { err, commandName: matchedRule!.command_name },
+            'Email command execution failed',
+          ),
+        );
 
         logger.info(
-          { messageId, subject, command: matchedRule.command_name, rule: matchedRule.name },
+          {
+            messageId,
+            subject,
+            command: matchedRule.command_name,
+            rule: matchedRule.name,
+          },
           'Email routed to command',
         );
         await this.markRead(messageId);
@@ -415,21 +441,57 @@ export class GmailChannel implements Channel {
     const groups = this.opts.registeredGroups();
 
     // Default: prefer dashboard_po as the default email destination, fall back to any main group
-    const poEntry = Object.entries(groups).find(([, g]) => g.folder === 'dashboard_po');
-    const mainEntry = poEntry || Object.entries(groups).find(([, g]) => g.isMain === true);
+    const poEntry = Object.entries(groups).find(
+      ([, g]) => g.folder === 'dashboard_po',
+    );
+    const mainEntry =
+      poEntry || Object.entries(groups).find(([, g]) => g.isMain === true);
     const defaultJid = mainEntry ? mainEntry[0] : '';
 
-    // Run Gemini extraction first (used regardless of rule match)
-    const extraction = await extractEmail(
-      `${senderName} <${senderEmail}>`,
-      subject,
-      body,
-    );
-    const content = extraction
-      ? extraction.summary
-      : `[Email from ${senderName} <${senderEmail}>]\nSubject: ${subject}\n\n${body}`;
+    // Step 1: Classify and extract structured data via Gemini
+    const senderFull = `${senderName} <${senderEmail}>`;
+    const classification = await classifyEmail(senderFull, subject, body);
 
-    // Load enabled rules sorted by priority
+    // Build human-readable content from classification
+    let content: string;
+    let emailType: string | null = null;
+    let structuredData: string | null = null;
+    let inputTokens = 0;
+    let outputTokens = 0;
+
+    if (classification) {
+      const c = classification.classification;
+      emailType = c.emailType;
+      inputTokens = classification.inputTokens;
+      outputTokens = classification.outputTokens;
+
+      if (c.data) {
+        structuredData = JSON.stringify(c.data);
+      }
+
+      // Format content for the agent
+      content = `[Email from ${senderFull}] Subject: ${subject}\nType: ${c.emailType}\n\n${c.summary}`;
+      if (c.data) {
+        // Generic key-value formatting for any schema type
+        const details = Object.entries(c.data as Record<string, unknown>)
+          .filter(([, v]) => v !== 'NA' && v !== '' && v !== null && v !== undefined && v !== 0)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join('\n');
+        if (details) content += `\n\n${details}`;
+      }
+    } else {
+      // Fallback to old extraction if classification fails
+      const extraction = await extractEmail(senderFull, subject, body);
+      if (extraction) {
+        content = extraction.summary;
+        inputTokens = extraction.inputTokens;
+        outputTokens = extraction.outputTokens;
+      } else {
+        content = `[Email from ${senderFull}]\nSubject: ${subject}\n\n${body}`;
+      }
+    }
+
+    // Step 2: Load and evaluate rules
     let rules: EmailRule[] = [];
     try {
       rules = await getEnabledEmailRules();
@@ -437,26 +499,44 @@ export class GmailChannel implements Channel {
       logger.warn({ err }, 'Failed to load email rules');
     }
 
-    // Evaluate rules
     // For from_pattern, also check email body — forwarded emails embed the original sender there
     let matchedRule: EmailRule | null = null;
     for (const rule of rules) {
-      if (
+      // If rule has email_type_pattern, it must match the classified type
+      if (rule.email_type_pattern) {
+        const allowedTypes = rule.email_type_pattern
+          .split(',')
+          .map((t) => t.trim().toLowerCase())
+          .filter(Boolean);
+        if (
+          !emailType ||
+          !allowedTypes.includes(emailType.toLowerCase())
+        ) {
+          continue; // type doesn't match, skip this rule
+        }
+      }
+
+      // Check traditional pattern matching (from/subject/body)
+      const hasPatterns =
+        rule.from_pattern || rule.subject_pattern || rule.body_pattern;
+      const patternMatch =
         matchesPattern(rule.from_pattern, `${senderName} <${senderEmail}>`) ||
         (rule.from_pattern && matchesPattern(rule.from_pattern, body)) ||
         matchesPattern(rule.subject_pattern, subject) ||
-        matchesPattern(rule.body_pattern, body)
-      ) {
+        matchesPattern(rule.body_pattern, body);
+
+      // Rule matches if: type-only rule (no patterns) OR patterns match
+      if (!hasPatterns || patternMatch) {
         matchedRule = rule;
         break; // first match wins (rules sorted by priority)
       }
     }
 
-    // If matched rule has a custom extract_prompt, re-extract
+    // If matched rule has a custom extract_prompt, re-extract with old method
     let finalContent = content;
     if (matchedRule?.extract_prompt) {
       const customExtraction = await extractEmail(
-        `${senderName} <${senderEmail}>`,
+        senderFull,
         subject,
         body,
         matchedRule.extract_prompt,
@@ -464,18 +544,21 @@ export class GmailChannel implements Channel {
       if (customExtraction) finalContent = customExtraction.summary;
     }
 
-    // Determine target
+    // Step 3: Determine target
     const action = matchedRule?.action || 'forward';
     let targetJid = defaultJid;
-    if ((matchedRule?.action === 'forward' || matchedRule?.action === 'command') && matchedRule.target_group) {
-      // Find group JID by folder name
+    if (
+      (matchedRule?.action === 'forward' ||
+        matchedRule?.action === 'command') &&
+      matchedRule.target_group
+    ) {
       const groupEntry = Object.entries(groups).find(
         ([, g]) => g.folder === matchedRule!.target_group,
       );
       if (groupEntry) targetJid = groupEntry[0];
     }
 
-    // Log to email_log
+    // Step 4: Log with classification data
     try {
       await logEmail({
         message_id: messageId,
@@ -487,13 +570,20 @@ export class GmailChannel implements Channel {
         action,
         target_group: matchedRule?.target_group || null,
         summary: finalContent?.slice(0, 2000) || null,
-        input_tokens: extraction?.inputTokens || 0,
-        output_tokens: extraction?.outputTokens || 0,
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
         processed_at: new Date().toISOString(),
+        email_type: emailType,
+        structured_data: structuredData,
       });
     } catch (err) {
       logger.warn({ err }, 'Failed to log email');
     }
+
+    logger.info(
+      { messageId, subject, emailType, hasStructuredData: !!structuredData },
+      'Email classified',
+    );
 
     return { targetJid, content: finalContent, action, matchedRule };
   }
@@ -572,7 +662,13 @@ function matchesPattern(pattern: string, text: string): boolean {
   const lower = text.toLowerCase();
   return pattern
     .split(',')
-    .map((t) => t.trim().replace(/^\*+|\*+$/g, '').trim().toLowerCase())
+    .map((t) =>
+      t
+        .trim()
+        .replace(/^\*+|\*+$/g, '')
+        .trim()
+        .toLowerCase(),
+    )
     .filter(Boolean)
     .some((term) => lower.includes(term));
 }

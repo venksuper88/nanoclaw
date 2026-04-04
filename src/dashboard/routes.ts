@@ -56,6 +56,7 @@ import {
 } from '../tenjin-snapshot.js';
 import { ASSISTANT_NAME, GROUPS_DIR } from '../config.js';
 import { listCommands } from '../commands.js';
+import { getRegisteredEmailTypes } from '../email-schemas.js';
 import { dashboardEvents, contextCache } from './events.js';
 import {
   resolveGroupFolderPath,
@@ -64,7 +65,11 @@ import {
 import { formatMessages, compressImageForAgent } from '../router.js';
 import { logger } from '../logger.js';
 import { randomUUID } from 'crypto';
-import { savePushSubscription, deletePushSubscription, getDbClient } from '../db.js';
+import {
+  savePushSubscription,
+  deletePushSubscription,
+  getDbClient,
+} from '../db.js';
 import { VAPID_PUBLIC_KEY } from '../config.js';
 import { getTranscriptSize, getSessionTranscriptSize } from '../tmux-runner.js';
 
@@ -359,7 +364,8 @@ export async function createRouter(): Promise<Router> {
       const commandName = parts[0];
       const group = groups[chatJid];
       if (commandName && group) {
-        const { runCommand: execCommand, resolveCommand: resolveCmd } = await import('../commands.js');
+        const { runCommand: execCommand, resolveCommand: resolveCmd } =
+          await import('../commands.js');
         if (resolveCmd(commandName, group.folder)) {
           // Store the user's command message in DB for chat history
           storeMessage({
@@ -376,8 +382,24 @@ export async function createRouter(): Promise<Router> {
             const agentName = group.name || ASSISTANT_NAME;
             const msgId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
             const timestamp = new Date().toISOString();
-            storeMessage({ id: msgId, chat_jid: chatJid, sender: agentName, sender_name: agentName, content: msg, timestamp, is_from_me: false, is_bot_message: true }).catch(() => {});
-            dashboardEvents.emitEvent('message:new', { chatJid, sender: agentName, senderName: agentName, content: msg, timestamp, isFromMe: false });
+            storeMessage({
+              id: msgId,
+              chat_jid: chatJid,
+              sender: agentName,
+              sender_name: agentName,
+              content: msg,
+              timestamp,
+              is_from_me: false,
+              is_bot_message: true,
+            }).catch(() => {});
+            dashboardEvents.emitEvent('message:new', {
+              chatJid,
+              sender: agentName,
+              senderName: agentName,
+              content: msg,
+              timestamp,
+              isFromMe: false,
+            });
           };
 
           // Run in background — don't block the response
@@ -387,7 +409,12 @@ export async function createRouter(): Promise<Router> {
             chatJid,
             input: { args: parts.slice(1).join(' '), sender: user.name },
             sendMessage: sendMsg,
-          }).catch((err) => logger.warn({ err, commandName }, 'Dashboard command execution failed'));
+          }).catch((err) =>
+            logger.warn(
+              { err, commandName },
+              'Dashboard command execution failed',
+            ),
+          );
 
           res.json({ ok: true });
           return;
@@ -1355,7 +1382,11 @@ export async function createRouter(): Promise<Router> {
   // ── Commands (for chat autocomplete) ──
   router.get('/api/commands', (req: Request, res: Response) => {
     const groupFolder = req.query.folder as string | undefined;
-    const commands: Array<{ command: string; description: string; prefix?: string }> = [
+    const commands: Array<{
+      command: string;
+      description: string;
+      prefix?: string;
+    }> = [
       {
         command: 'new',
         description: 'Clear context and start a fresh session',
@@ -1419,7 +1450,9 @@ export async function createRouter(): Promise<Router> {
       if (fs.existsSync(mcpConfigPath)) {
         try {
           const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf-8'));
-          for (const [name, config] of Object.entries(mcpConfig.mcpServers || {})) {
+          for (const [name, config] of Object.entries(
+            mcpConfig.mcpServers || {},
+          )) {
             addServer(name, config, 'global');
           }
         } catch {}
@@ -1442,7 +1475,9 @@ export async function createRouter(): Promise<Router> {
         if (fs.existsSync(mcpJson)) {
           try {
             const parsed = JSON.parse(fs.readFileSync(mcpJson, 'utf-8'));
-            for (const [name, config] of Object.entries(parsed.mcpServers || {})) {
+            for (const [name, config] of Object.entries(
+              parsed.mcpServers || {},
+            )) {
               addServer(name, config, resolvedDir);
             }
           } catch {}
@@ -1464,14 +1499,28 @@ export async function createRouter(): Promise<Router> {
 
   router.post('/api/email-rules', async (req: Request, res: Response) => {
     try {
-      const { name, priority, from_pattern, subject_pattern, body_pattern, action, target_group, command_name, extract_prompt, enabled } = req.body;
-      if (!name) return res.status(400).json({ ok: false, error: 'Name is required' });
+      const {
+        name,
+        priority,
+        from_pattern,
+        subject_pattern,
+        body_pattern,
+        email_type_pattern,
+        action,
+        target_group,
+        command_name,
+        extract_prompt,
+        enabled,
+      } = req.body;
+      if (!name)
+        return res.status(400).json({ ok: false, error: 'Name is required' });
       const rule = await createEmailRule({
         name,
         priority: priority ?? 0,
         from_pattern: from_pattern || '',
         subject_pattern: subject_pattern || '',
         body_pattern: body_pattern || '',
+        email_type_pattern: email_type_pattern || '',
         action: action || 'forward',
         target_group: target_group || '',
         command_name: command_name || '',
@@ -1507,6 +1556,16 @@ export async function createRouter(): Promise<Router> {
     }
   });
 
+  // ── Email Types (dynamic from registered schemas) ──
+  router.get('/api/email-types', (_req: Request, res: Response) => {
+    try {
+      const types = getRegisteredEmailTypes();
+      res.json({ ok: true, data: types });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: 'Failed to load email types' });
+    }
+  });
+
   // ── Email Log ──
   router.get('/api/email-log', async (req: Request, res: Response) => {
     try {
@@ -1524,7 +1583,11 @@ export async function createRouter(): Promise<Router> {
     try {
       const log = await getEmailLog(10000, 0);
       const now = new Date();
-      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+      const todayStart = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+      ).toISOString();
       const weekStart = new Date(now.getTime() - 7 * 86400000).toISOString();
 
       const stats = {
@@ -1551,7 +1614,15 @@ export async function createRouter(): Promise<Router> {
 
       res.json({ ok: true, data: stats });
     } catch {
-      res.json({ ok: true, data: { today: { calls: 0, input_tokens: 0, output_tokens: 0 }, week: { calls: 0, input_tokens: 0, output_tokens: 0 }, total: { calls: 0, input_tokens: 0, output_tokens: 0 }, byType: {} } });
+      res.json({
+        ok: true,
+        data: {
+          today: { calls: 0, input_tokens: 0, output_tokens: 0 },
+          week: { calls: 0, input_tokens: 0, output_tokens: 0 },
+          total: { calls: 0, input_tokens: 0, output_tokens: 0 },
+          byType: {},
+        },
+      });
     }
   });
 
@@ -1565,14 +1636,17 @@ export async function createRouter(): Promise<Router> {
     }
   });
 
-  router.post('/api/alerts/:id/dismiss', async (req: Request, res: Response) => {
-    try {
-      await dismissAlert(Number(req.params.id as string));
-      res.json({ ok: true, data: null });
-    } catch (err) {
-      res.status(500).json({ ok: false, error: String(err) });
-    }
-  });
+  router.post(
+    '/api/alerts/:id/dismiss',
+    async (req: Request, res: Response) => {
+      try {
+        await dismissAlert(Number(req.params.id as string));
+        res.json({ ok: true, data: null });
+      } catch (err) {
+        res.status(500).json({ ok: false, error: String(err) });
+      }
+    },
+  );
 
   // ── Skills ──
   router.get('/api/skills', (_req: Request, res: Response) => {
@@ -1673,7 +1747,14 @@ export async function createRouter(): Promise<Router> {
 
   // ── Finance sub-app routes (loaded from ~/Projects/deven-finance/) ─────────
   try {
-    const financePath = path.resolve(os.homedir(), 'Projects', 'deven-finance', 'dist', 'api', 'index.js');
+    const financePath = path.resolve(
+      os.homedir(),
+      'Projects',
+      'deven-finance',
+      'dist',
+      'api',
+      'index.js',
+    );
     if (fs.existsSync(financePath)) {
       const { createFinanceRouter } = await import(financePath);
       const financeRouter = createFinanceRouter({
@@ -1686,7 +1767,10 @@ export async function createRouter(): Promise<Router> {
       router.use('/api/finance', financeRouter);
       logger.info('Finance sub-app routes loaded from deven-finance');
     } else {
-      logger.warn({ financePath }, 'Finance sub-app not found, finance routes disabled');
+      logger.warn(
+        { financePath },
+        'Finance sub-app not found, finance routes disabled',
+      );
     }
   } catch (err) {
     logger.error({ err }, 'Failed to load finance sub-app routes');

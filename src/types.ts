@@ -116,6 +116,26 @@ export interface Todo {
   updated_at: string;
 }
 
+// --- Email Classification & Structured Extraction ---
+
+/** Schema definition for an email type — loaded from groups/{folder}/email-schemas.json */
+export interface EmailSchemaDefinition {
+  type: string; // e.g. "FinancialTransaction", "SupportTicket"
+  description: string; // short description for the LLM to understand when to classify as this type
+  classificationPrompt: string; // detailed prompt telling the LLM how to identify this type
+  fields: {
+    mandatory: Record<string, string>; // field name → description/allowed values
+    optional: Record<string, string>; // field name → description (use "NA" when not available)
+  };
+}
+
+/** The classification + extraction result from the LLM */
+export interface EmailClassification {
+  emailType: string; // dynamic — matches a registered schema type, or "Other"
+  summary: string; // 1-2 sentence plain English summary
+  data: Record<string, unknown> | null; // typed extraction fields per the matched schema
+}
+
 // --- Email Rules ---
 
 export interface EmailRule {
@@ -125,6 +145,7 @@ export interface EmailRule {
   from_pattern: string;
   subject_pattern: string;
   body_pattern: string;
+  email_type_pattern: string; // comma-separated EmailType values to match (empty = any)
   action: 'forward' | 'archive' | 'discard' | 'command';
   target_group: string; // group folder name (for 'forward'/'command' actions)
   command_name: string; // command to invoke (for 'command' action)
