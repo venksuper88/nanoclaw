@@ -19,6 +19,9 @@ const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
+const disabledTools = new Set(
+  (process.env.NANOCLAW_DISABLED_TOOLS || '').split(',').filter(Boolean),
+);
 
 function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(dir, { recursive: true });
@@ -39,7 +42,13 @@ const server = new McpServer({
   version: '1.0.0',
 });
 
-server.tool(
+// Wrapper that skips tool registration if the tool is disabled for this group
+const tool: typeof server.tool = (name: string, ...args: any[]) => {
+  if (disabledTools.has(name)) return;
+  return (server.tool as any)(name, ...args);
+};
+
+tool(
   'send_message',
   "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times.",
   {
@@ -64,7 +73,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
 
@@ -154,7 +163,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
   },
 );
 
-server.tool(
+tool(
   'list_tasks',
   "List all scheduled tasks. From main: shows all tasks. From other groups: shows only that group's tasks.",
   {},
@@ -192,7 +201,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'pause_task',
   'Pause a scheduled task. It will not run until resumed.',
   { task_id: z.string().describe('The task ID to pause') },
@@ -211,7 +220,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'resume_task',
   'Resume a paused task.',
   { task_id: z.string().describe('The task ID to resume') },
@@ -230,7 +239,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'cancel_task',
   'Cancel and delete a scheduled task.',
   { task_id: z.string().describe('The task ID to cancel') },
@@ -249,7 +258,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'update_task',
   'Update an existing scheduled task. Only provided fields are changed; omitted fields stay the same.',
   {
@@ -299,7 +308,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'register_group',
   `Register a new chat/group so the agent can respond to messages there. Main group only.
 
@@ -342,7 +351,7 @@ For project-specific agents, use the workDir parameter to set the agent's workin
   },
 );
 
-server.tool(
+tool(
   'save_memory',
   `Save an important fact or preference to long-term memory. Use this when you learn something worth remembering for future conversations — user preferences, project decisions, key facts, or important context.
 
@@ -378,7 +387,7 @@ Good examples:
 
 // ── Todos ──
 
-server.tool(
+tool(
   'add_todo',
   'Add a todo item for the user. Supports priority, due dates, reminders, and recurrence. The todo will appear in the Todos tab of Mission Control. Use this for BOTH todos and reminders — a reminder is just a todo with remind_at set.',
   {
@@ -395,7 +404,7 @@ server.tool(
       title: args.title,
       data: args.data,
       priority: args.priority || 'medium',
-      due_date: args.due_date,
+      due_date: args.due_date || (args.recurrence ? new Date().toISOString() : undefined),
       remind_at: args.remind_at,
       recurrence: args.recurrence,
       groupFolder,
@@ -405,7 +414,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'update_todo',
   'Update an existing todo item — change title, notes, status, priority, due date, reminder, or recurrence.',
   {
@@ -436,7 +445,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'complete_todo',
   'Mark a todo as done.',
   {
@@ -454,7 +463,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'delete_todo',
   'Permanently delete a todo item.',
   {
@@ -471,7 +480,7 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'list_todos',
   "List the user's todos. Returns all non-completed todos by default.",
   {
@@ -500,8 +509,7 @@ server.tool(
   },
 );
 
-
-server.tool(
+tool(
   'run_command',
   `Run a command (script) available to this group. Commands are like skills but don't need an LLM — they're scripts with a standard interface.
 
@@ -531,7 +539,7 @@ Use list_commands first to see what's available.`,
   },
 );
 
-server.tool(
+tool(
   'list_commands',
   'List all commands (scripts) available to this group. Shows both group-local and global commands.',
   {},

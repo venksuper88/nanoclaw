@@ -68,8 +68,9 @@ export function SettingsView({ groups }: { groups: Group[] }) {
   const [editingMemory, setEditingMemory] = useState<string | null>(null);
   const [memoryFilter, setMemoryFilter] = useState<'all' | 'private' | 'shared'>('all');
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
-  const [groupSettings, setGroupSettings] = useState<Record<string, { memoryMode: string; memoryScopes: string[]; memoryUserId: string; isTransient: boolean; showInSidebar: boolean; idleTimeoutMinutes: number | null; allowedSkills: string[]; allowedMcpServers: string[]; model: string; contextWindow: string; tokens: Array<{ name: string; role: string; isOwner: boolean }> }>>({});
-  const [availableSkills, setAvailableSkills] = useState<string[]>([]);
+  const [groupSettings, setGroupSettings] = useState<Record<string, { memoryMode: string; memoryScopes: string[]; memoryUserId: string; isTransient: boolean; showInSidebar: boolean; idleTimeoutMinutes: number | null; allowedSkills: string[]; allowedMcpServers: string[]; disabledTools: string[]; model: string; contextWindow: string; tokens: Array<{ name: string; role: string; isOwner: boolean }> }>>({});
+  const [availableSkills, setAvailableSkills] = useState<Array<{ name: string; description: string; type: string; tokenEstimate: number }>>([]);
+  const [availableTools, setAvailableTools] = useState<Array<{ name: string; description: string; tokenEstimate: number }>>([]);
   const [availableMcpServers, setAvailableMcpServers] = useState<Array<{ name: string; type: string }>>([]);
 
   // Scope definitions
@@ -81,40 +82,58 @@ export function SettingsView({ groups }: { groups: Group[] }) {
   // Email rules state
   const [emailTypes, setEmailTypes] = useState<string[]>(['Other']);
   const [emailRules, setEmailRules] = useState<EmailRuleRow[]>([]);
-  const [emailLog, setEmailLog] = useState<Array<{ sender: string; subject: string; rule_name: string | null; action: string; target_group: string | null; processed_at: string; email_type: string | null }>>([]);
+  const [emailLog, setEmailLog] = useState<Array<{ from_address: string; subject: string; rule_name: string | null; action: string; target_group: string | null; processed_at: string; email_type: string | null }>>([]);
   const [extractionStats, setExtractionStats] = useState<{ today: { calls: number; input_tokens: number; output_tokens: number }; week: { calls: number; input_tokens: number; output_tokens: number }; total: { calls: number; input_tokens: number; output_tokens: number }; byType: Record<string, number> } | null>(null);
   const [showRuleCreate, setShowRuleCreate] = useState(false);
   const [editingRule, setEditingRule] = useState<string | null>(null);
   const [ruleForm, setRuleForm] = useState({ name: '', priority: 100, from_pattern: '', subject_pattern: '', body_pattern: '', email_type_pattern: '', action: 'forward' as 'forward' | 'archive' | 'discard' | 'command', target_group: '', command_name: '', extract_prompt: '', enabled: true });
+  const [availableCommands, setAvailableCommands] = useState<Array<{ command: string; description: string }>>([]);
 
   // Move-to-shared state
   const [movingMemory, setMovingMemory] = useState<string | null>(null);
   const [suggestedScope, setSuggestedScope] = useState<string | null>(null);
   const [moveLoading, setMoveLoading] = useState(false);
 
-  // Check if owner + load available skills
+  // Check if owner + load available tools/mcps
   useEffect(() => {
     api.getMe().then(r => {
       if (r.ok) setIsOwner(r.data.isOwner);
     }).catch(() => {});
     api.getSkills().then(r => {
-      if (r.ok) {
-        setAvailableSkills(r.data.map((s: { name: string }) => s.name));
-      }
+      if (r.ok) setAvailableSkills(r.data);
+    }).catch(() => {});
+    api.getTools().then(r => {
+      if (r.ok) setAvailableTools(r.data);
     }).catch(() => {});
     api.getMcpServers().then(r => {
       if (r.ok) setAvailableMcpServers(r.data);
     }).catch(() => {});
   }, []);
 
+  // Reload skills when expanded group changes (project skills differ per group)
+  useEffect(() => {
+    if (!expandedGroup) return;
+    const group = groups.find(g => g.jid === expandedGroup);
+    if (!group) return;
+    api.getSkills(group.folder).then(r => {
+      if (r.ok) setAvailableSkills(r.data);
+    }).catch(() => {});
+  }, [expandedGroup, groups]);
+
   // Load email rules
   useEffect(() => {
     if (section !== 'email' || !isOwner) return;
     api.getEmailTypes().then(r => { if (r.ok) setEmailTypes(r.data); }).catch(() => {});
     api.getEmailRules().then(r => { if (r.ok) setEmailRules(r.data); }).catch(() => {});
-    api.getEmailLog().then(r => { if (r.ok) setEmailLog(r.data); }).catch(() => {});
+    api.getEmailLog(10).then(r => { if (r.ok) setEmailLog(r.data); }).catch(() => {});
     api.getExtractionStats().then(r => { if (r.ok) setExtractionStats(r.data); }).catch(() => {});
   }, [section, isOwner]);
+
+  // Load commands for selected target group when action is 'command'
+  useEffect(() => {
+    if (ruleForm.action !== 'command' || !ruleForm.target_group) { setAvailableCommands([]); return; }
+    api.getCommands(ruleForm.target_group).then(r => { if (r.ok) setAvailableCommands(r.data.filter((c: any) => c.prefix === '!')); }).catch(() => {});
+  }, [ruleForm.action, ruleForm.target_group]);
 
   // Load tokens
   useEffect(() => {
@@ -243,7 +262,7 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                 if (!gs) loadSettings();
               };
 
-              const updateSetting = async (update: { memoryMode?: string; memoryScopes?: string[]; memoryUserId?: string; isTransient?: boolean; showInSidebar?: boolean; idleTimeoutMinutes?: number | null; allowedSkills?: string[]; allowedMcpServers?: string[]; model?: string; contextWindow?: string }) => {
+              const updateSetting = async (update: { memoryMode?: string; memoryScopes?: string[]; memoryUserId?: string; isTransient?: boolean; showInSidebar?: boolean; idleTimeoutMinutes?: number | null; allowedSkills?: string[]; allowedMcpServers?: string[]; disabledTools?: string[]; model?: string; contextWindow?: string }) => {
                 await api.updateGroupSettings(g.jid, update);
                 loadSettings();
               };
@@ -377,6 +396,46 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                         </div>
                       </div>
 
+                      {/* Nanoclaw Tools */}
+                      {availableTools.length > 0 && (
+                      <div style={{ marginBottom: 12 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Nanoclaw Tools</div>
+                          <div style={{ fontSize: 10, color: 'var(--text3)' }}>
+                            ~{availableTools.filter(t => !(gs.disabledTools || []).includes(t.name)).reduce((sum, t) => sum + t.tokenEstimate, 0).toLocaleString()} tokens
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          {availableTools.map(t => {
+                            const disabled = (gs.disabledTools || []).includes(t.name);
+                            return (
+                              <div key={t.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
+                                <button
+                                  className={`btn btn-sm ${disabled ? 'btn-outline' : 'btn-blue'}`}
+                                  style={{ minWidth: 44, fontSize: 11, padding: '2px 8px' }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const current = gs.disabledTools || [];
+                                    updateSetting({ disabledTools: disabled ? current.filter(n => n !== t.name) : [...current, t.name] });
+                                  }}
+                                >{disabled ? 'Off' : 'On'}</button>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <span style={{ fontSize: 12, fontWeight: 600, color: disabled ? 'var(--text3)' : 'var(--text1)' }}>{t.name}</span>
+                                  <span style={{ fontSize: 10, color: 'var(--text3)', marginLeft: 6 }}>~{t.tokenEstimate} tok</span>
+                                </div>
+                                <div style={{ fontSize: 11, color: 'var(--text2)', maxWidth: '50%', textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.description}</div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 4 }}>
+                          {(gs.disabledTools || []).length === 0 ? 'All tools enabled' :
+                           `${availableTools.length - (gs.disabledTools || []).length} of ${availableTools.length} tools enabled`}
+                          {(gs.disabledTools || []).length > 0 && ' \u00B7 requires /new to take effect'}
+                        </div>
+                      </div>
+                      )}
+
                       {/* MCP Servers */}
                       {availableMcpServers.length > 0 && (
                       <div style={{ marginBottom: 12 }}>
@@ -390,9 +449,9 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                               <button key={srv.name}
                                 className={`btn btn-sm ${isEnabled ? 'btn-blue' : 'btn-outline'}`}
                                 title={`${srv.name} (${srv.type})`}
-                                onClick={() => {
+                                onClick={(e) => {
+                                  e.stopPropagation();
                                   if (isAllMode) {
-                                    // Switch from all to all-except-this
                                     updateSetting({ allowedMcpServers: availableMcpServers.filter(s => s.name !== srv.name).map(s => s.name) });
                                   } else if (isEnabled) {
                                     const next = allowed.filter(s => s !== srv.name && s !== '__all__');
@@ -416,35 +475,65 @@ export function SettingsView({ groups }: { groups: Group[] }) {
 
                       {/* Skills */}
                       <div style={{ marginBottom: 12 }}>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>Skills</div>
-                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                          {availableSkills.map(skill => {
-                            const isAllowed = gs.allowedSkills.length === 0 || gs.allowedSkills.includes(skill);
-                            const isAllMode = gs.allowedSkills.length === 0;
-                            return (
-                              <button key={skill}
-                                className={`btn btn-sm ${isAllowed ? 'btn-blue' : 'btn-outline'}`}
-                                onClick={() => {
-                                  if (isAllMode) {
-                                    // Switch from "all" to "all except this one"
-                                    updateSetting({ allowedSkills: availableSkills.filter(s => s !== skill) });
-                                  } else if (isAllowed) {
-                                    const next = gs.allowedSkills.filter(s => s !== skill);
-                                    updateSetting({ allowedSkills: next.length === 0 ? ['__none__'] : next });
-                                  } else {
-                                    const next = [...gs.allowedSkills.filter(s => s !== '__none__'), skill];
-                                    updateSetting({ allowedSkills: next.length >= availableSkills.length ? [] : next });
-                                  }
-                                }}
-                              >{skill}</button>
-                            );
-                          })}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Skills</div>
+                          <div style={{ fontSize: 10, color: 'var(--text3)' }}>
+                            ~{availableSkills.filter(s => {
+                              const isNative = s.type === 'project' || s.type === 'group';
+                              return isNative || gs.allowedSkills.length === 0 || gs.allowedSkills.includes(s.name);
+                            }).reduce((sum, s) => sum + s.tokenEstimate, 0).toLocaleString()} tokens
+                          </div>
                         </div>
-                        <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 4 }}>
-                          {gs.allowedSkills.length === 0 ? 'All skills enabled' :
-                           gs.allowedSkills[0] === '__none__' ? 'No skills' :
-                           `${gs.allowedSkills.filter(s => s !== '__none__').length} of ${availableSkills.length} skills enabled`}
-                        </div>
+                        {(() => {
+                          const managedSkills = availableSkills.filter(s => s.type !== 'project' && s.type !== 'group');
+                          const nativeSkills = availableSkills.filter(s => s.type === 'project' || s.type === 'group');
+                          const isAllMode = gs.allowedSkills.length === 0;
+                          return (<>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                              {managedSkills.map(skill => {
+                                const isAllowed = isAllMode || gs.allowedSkills.includes(skill.name);
+                                return (
+                                  <div key={skill.name} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
+                                    <button
+                                      className={`btn btn-sm ${isAllowed ? 'btn-blue' : 'btn-outline'}`}
+                                      style={{ minWidth: 44, fontSize: 11, padding: '2px 8px' }}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (isAllMode) {
+                                          updateSetting({ allowedSkills: managedSkills.filter(s => s.name !== skill.name).map(s => s.name) });
+                                        } else if (isAllowed) {
+                                          const next = gs.allowedSkills.filter(s => s !== skill.name);
+                                          updateSetting({ allowedSkills: next.length === 0 ? ['__none__'] : next });
+                                        } else {
+                                          const next = [...gs.allowedSkills.filter(s => s !== '__none__'), skill.name];
+                                          updateSetting({ allowedSkills: next.length >= managedSkills.length ? [] : next });
+                                        }
+                                      }}
+                                    >{isAllowed ? 'On' : 'Off'}</button>
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                      <span style={{ fontSize: 12, fontWeight: 600, color: isAllowed ? 'var(--text1)' : 'var(--text3)' }}>{skill.name}</span>
+                                      <span style={{ fontSize: 10, color: 'var(--text3)', marginLeft: 6 }}>~{skill.tokenEstimate.toLocaleString()} tok</span>
+                                      <span style={{ fontSize: 10, color: 'var(--text3)', marginLeft: 4 }}>({skill.type})</span>
+                                    </div>
+                                    {skill.description && <div style={{ fontSize: 11, color: 'var(--text2)', maxWidth: '40%', textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{skill.description}</div>}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                            {nativeSkills.length > 0 && (
+                              <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 8, lineHeight: 1.5 }}>
+                                <span style={{ fontWeight: 600, color: 'var(--text2)' }}>Native ({nativeSkills.length}):</span>{' '}
+                                {nativeSkills.map(s => s.name).join(', ')}
+                              </div>
+                            )}
+                            <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 4 }}>
+                              {isAllMode ? `All ${managedSkills.length} managed skills enabled` :
+                               gs.allowedSkills[0] === '__none__' ? 'No managed skills enabled' :
+                               `${gs.allowedSkills.filter(s => s !== '__none__').length} of ${managedSkills.length} managed skills enabled`}
+                              {nativeSkills.length > 0 && ` + ${nativeSkills.length} native`}
+                            </div>
+                          </>);
+                        })()}
                       </div>
 
                       {/* Visibility */}
@@ -575,12 +664,13 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                   <label style={{ fontSize: 12, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Action</label>
                   <div className="segmented">
                     <button className={`seg-btn ${ruleForm.action === 'forward' ? 'active' : ''}`} onClick={() => setRuleForm(f => ({ ...f, action: 'forward' }))}>Forward</button>
+                    <button className={`seg-btn ${ruleForm.action === 'command' ? 'active' : ''}`} onClick={() => setRuleForm(f => ({ ...f, action: 'command' }))}>Command</button>
                     <button className={`seg-btn ${ruleForm.action === 'archive' ? 'active' : ''}`} onClick={() => setRuleForm(f => ({ ...f, action: 'archive' }))}>Archive</button>
                     <button className={`seg-btn ${ruleForm.action === 'discard' ? 'active' : ''}`} onClick={() => setRuleForm(f => ({ ...f, action: 'discard' }))}>Discard</button>
                   </div>
                 </div>
               </div>
-              {ruleForm.action === 'forward' && (
+              {(ruleForm.action === 'forward' || ruleForm.action === 'command') && (
                 <div style={{ marginBottom: 10 }}>
                   <label style={{ fontSize: 12, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Target Group</label>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -590,6 +680,24 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                       </button>
                     ))}
                   </div>
+                </div>
+              )}
+              {ruleForm.action === 'command' && (
+                <div style={{ marginBottom: 10 }}>
+                  <label style={{ fontSize: 12, color: 'var(--text2)', display: 'block', marginBottom: 3 }}>Command</label>
+                  {availableCommands.length > 0 ? (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {availableCommands.map(cmd => (
+                        <button key={cmd.command} className={`btn btn-sm ${ruleForm.command_name === cmd.command ? 'btn-blue' : 'btn-outline'}`} onClick={() => setRuleForm(f => ({ ...f, command_name: cmd.command }))} title={cmd.description}>
+                          {cmd.command}
+                        </button>
+                      ))}
+                    </div>
+                  ) : ruleForm.target_group ? (
+                    <div style={{ fontSize: 12, color: 'var(--text3)', padding: '8px 0' }}>No commands found for this group.</div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: 'var(--text3)', padding: '8px 0' }}>Select a target group first.</div>
+                  )}
                 </div>
               )}
               <div style={{ display: 'flex', gap: 8 }}>
@@ -683,7 +791,7 @@ export function SettingsView({ groups }: { groups: Group[] }) {
                     {entry.subject.length > 50 ? entry.subject.slice(0, 47) + '...' : entry.subject}
                   </div>
                   <div className="list-subtitle" style={{ fontSize: 11 }}>
-                    {entry.sender}
+                    {entry.from_address}
                     {entry.email_type ? ` · ${entry.email_type}` : ''}
                     {entry.rule_name ? ` · rule: ${entry.rule_name}` : ' · no match'}
                     {entry.target_group ? ` → ${groups.find(g => g.folder === entry.target_group)?.name || entry.target_group}` : ''}

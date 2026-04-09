@@ -106,7 +106,7 @@ export const api = {
     request<ApiResponse<{ uptime: number; assistantName: string; groupCount: number; taskCount: number; activeTasks: number; sessionCount: number }>>('/api/status'),
 
   getGroups: () =>
-    request<ApiResponse<Array<{ jid: string; name: string; folder: string; channel: string; lastActivity: string; isMain: boolean; isTransient: boolean; requiresTrigger: boolean; hasSession: boolean; showInSidebar: boolean; model: string }>>>('/api/groups'),
+    request<ApiResponse<Array<{ jid: string; name: string; folder: string; channel: string; lastActivity: string; isMain: boolean; isTransient: boolean; requiresTrigger: boolean; hasSession: boolean; showInSidebar: boolean; model: string; contextWindow: string }>>>('/api/groups'),
 
   getMessages: (jid: string, limit = 50) =>
     request<ApiResponse<Array<{ id: string; sender: string; senderName: string; content: string; timestamp: string; isFromMe: boolean; isBotMessage: boolean }>>>(`/api/groups/${encodeURIComponent(jid)}/messages?limit=${limit}`),
@@ -156,7 +156,7 @@ export const api = {
 
   // Todos
   getTodos: () =>
-    request<ApiResponse<Array<{ id: string; user_id: string; title: string; data: string | null; status: string; priority: string; due_date: string | null; created_by: string; created_at: string; updated_at: string }>>>('/api/todos'),
+    request<ApiResponse<Array<{ id: string; user_id: string; title: string; data: string | null; status: string; priority: string; due_date: string | null; remind_at: string | null; recurrence: string | null; reminder_fired_at: string | null; created_by: string; created_at: string; updated_at: string }>>>('/api/todos'),
 
   createTodo: (todo: { title: string; data?: string; priority?: string; due_date?: string }) =>
     request<ApiResponse<any>>('/api/todos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(todo) }),
@@ -174,9 +174,9 @@ export const api = {
     request<ApiResponse<{ percent: number; sizeKB: number }>>(`/api/groups/${encodeURIComponent(jid)}/context`),
 
   getGroupSettings: (jid: string) =>
-    request<ApiResponse<{ jid: string; name: string; folder: string; isMain: boolean; isTransient: boolean; memoryMode: string; memoryScopes: string[]; memoryUserId: string; showInSidebar: boolean; idleTimeoutMinutes: number | null; allowedSkills: string[]; model: string; tokens: Array<{ name: string; role: string; isOwner: boolean }> }>>(`/api/groups/${encodeURIComponent(jid)}/settings`),
+    request<ApiResponse<{ jid: string; name: string; folder: string; isMain: boolean; isTransient: boolean; memoryMode: string; memoryScopes: string[]; memoryUserId: string; showInSidebar: boolean; idleTimeoutMinutes: number | null; allowedSkills: string[]; allowedMcpServers: string[]; disabledTools: string[]; model: string; contextWindow: string; tokens: Array<{ name: string; role: string; isOwner: boolean }> }>>(`/api/groups/${encodeURIComponent(jid)}/settings`),
 
-  updateGroupSettings: (jid: string, settings: { memoryMode?: string; memoryScopes?: string[]; memoryUserId?: string; isTransient?: boolean; showInSidebar?: boolean; idleTimeoutMinutes?: number | null; allowedSkills?: string[]; allowedMcpServers?: string[]; model?: string }) =>
+  updateGroupSettings: (jid: string, settings: { memoryMode?: string; memoryScopes?: string[]; memoryUserId?: string; isTransient?: boolean; showInSidebar?: boolean; idleTimeoutMinutes?: number | null; allowedSkills?: string[]; allowedMcpServers?: string[]; disabledTools?: string[]; model?: string; contextWindow?: string }) =>
     request<ApiResponse<any>>(`/api/groups/${encodeURIComponent(jid)}/settings`, {
       method: 'PUT',
       body: JSON.stringify(settings),
@@ -207,7 +207,7 @@ export const api = {
     request<ApiResponse<{ name: string; role: string; isOwner: boolean; canSend: boolean; allowedGroups: string[] }>>('/api/me'),
 
   getTokens: () =>
-    request<ApiResponse<Array<{ token: string; tokenFull: string; name: string; role: string; allowedGroups: string[]; canSend: boolean; isOwner: boolean; createdAt: string }>>>('/api/tokens'),
+    request<ApiResponse<Array<{ token: string; tokenFull: string; name: string; role: string; allowedGroups: string[]; canSend: boolean; isOwner: boolean; createdAt: string; reminderGroupJid: string | null }>>>('/api/tokens'),
 
   createToken: (name: string, role: string, allowedGroups: string[], canSend: boolean) =>
     request<ApiResponse<{ token: string; name: string }>>('/api/tokens', {
@@ -221,8 +221,11 @@ export const api = {
   getCommands: (folder?: string) =>
     request<ApiResponse<Array<{ command: string; description: string; prefix?: string }>>>(`/api/commands${folder ? `?folder=${encodeURIComponent(folder)}` : ''}`),
 
-  getSkills: () =>
-    request<ApiResponse<Array<{ name: string; description: string; type: string; folder: string }>>>('/api/skills'),
+  getSkills: (folder?: string) =>
+    request<ApiResponse<Array<{ name: string; description: string; type: string; folder: string; tokenEstimate: number }>>>(`/api/skills${folder ? `?folder=${encodeURIComponent(folder)}` : ''}`),
+
+  getTools: () =>
+    request<ApiResponse<Array<{ name: string; description: string; tokenEstimate: number }>>>('/api/tools'),
 
   getMcpServers: () =>
     request<ApiResponse<Array<{ name: string; type: string }>>>('/api/mcp-servers'),
@@ -248,7 +251,7 @@ export const api = {
     if (opts?.since) params.set('since', opts.since);
     if (opts?.until) params.set('until', opts.until);
     const qs = params.toString();
-    return request<ApiResponse<Array<{ group_folder: string; total_input: number; total_cache_creation: number; total_cache_read: number; total_output: number; total_tokens: number; turn_count: number; stateful_tokens: number; stateless_tokens: number; stateful_turns: number; stateless_turns: number }>>>(`/api/token-usage${qs ? `?${qs}` : ''}`);
+    return request<ApiResponse<Array<{ group_folder: string; total_input: number; total_cache_creation: number; total_cache_read: number; total_output: number; total_tokens: number; total_cost_usd: number; turn_count: number; stateful_tokens: number; stateless_tokens: number; stateful_turns: number; stateless_turns: number }>>>(`/api/token-usage${qs ? `?${qs}` : ''}`);
   },
 
   getAlerts: () =>
@@ -256,6 +259,8 @@ export const api = {
 
   dismissAlert: (id: number) =>
     request<ApiResponse<null>>(`/api/alerts/${id}/dismiss`, { method: 'POST' }),
+  dismissAllAlerts: () =>
+    request<ApiResponse<null>>('/api/alerts/dismiss-all', { method: 'POST' }),
 
   getAnalytics: () =>
     request<ApiResponse<{ groups: Array<{ jid: string; name: string; folder: string; channel: string; totalMessages: number; userMessages: number; botMessages: number; hasSession: boolean; lastActivity: string; transcriptSize: number; currentTranscriptSize: number; contextPercent: number; attachmentSize: number }>; totalGroups: number; totalTasks: number; activeTasks: number; totalSessions: number }>>('/api/analytics'),

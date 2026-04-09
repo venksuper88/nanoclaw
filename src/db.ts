@@ -319,6 +319,15 @@ async function createSchema(database: Client): Promise<void> {
     /* column already exists */
   }
 
+  // Add cost_usd to token_usage (actual cost from Claude result event)
+  try {
+    await database.execute(
+      `ALTER TABLE token_usage ADD COLUMN cost_usd REAL DEFAULT 0`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
   // Email routing rules
   await database.execute(`
     CREATE TABLE IF NOT EXISTS email_rules (
@@ -414,6 +423,17 @@ async function createSchema(database: Client): Promise<void> {
   await database.execute(
     `CREATE INDEX IF NOT EXISTS idx_agent_alerts_created ON agent_alerts(created_at)`,
   );
+
+  // Per-group MCP server allowlist and tool disabling
+  for (const col of ['allowed_mcp_servers', 'disabled_tools']) {
+    try {
+      await database.execute(
+        `ALTER TABLE registered_groups ADD COLUMN ${col} TEXT DEFAULT '[]'`,
+      );
+    } catch {
+      /* column already exists */
+    }
+  }
 }
 
 export async function initDatabase(): Promise<void> {
@@ -1066,8 +1086,8 @@ export async function setRegisteredGroup(
     throw new Error(`Invalid group folder "${group.folder}" for JID ${jid}`);
   }
   await db.execute({
-    sql: `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main, is_transient, memory_mode, memory_scopes, memory_user_id, show_in_sidebar, idle_timeout_minutes, allowed_skills, mode, work_dir, model)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    sql: `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main, is_transient, memory_mode, memory_scopes, memory_user_id, show_in_sidebar, idle_timeout_minutes, allowed_skills, mode, work_dir, model, allowed_mcp_servers, disabled_tools)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       jid,
       group.name,
@@ -1087,6 +1107,8 @@ export async function setRegisteredGroup(
       group.mode || 'tmux',
       group.workDir ?? null,
       group.model || 'opus',
+      JSON.stringify(group.allowedMcpServers || []),
+      JSON.stringify(group.disabledTools || []),
     ],
   });
 }
@@ -1113,6 +1135,8 @@ export async function getAllRegisteredGroups(): Promise<
     mode: string | null;
     work_dir: string | null;
     model: string | null;
+    allowed_mcp_servers: string | null;
+    disabled_tools: string | null;
   }>;
   const out: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
@@ -1141,6 +1165,8 @@ export async function getAllRegisteredGroups(): Promise<
       mode: row.mode || 'tmux',
       workDir: row.work_dir || undefined,
       model: (row.model as 'opus' | 'sonnet') || 'opus',
+      allowedMcpServers: row.allowed_mcp_servers ? JSON.parse(row.allowed_mcp_servers) : [],
+      disabledTools: row.disabled_tools ? JSON.parse(row.disabled_tools) : [],
     };
   }
   return out;
@@ -1398,10 +1424,11 @@ export async function recordTokenUsage(
     output_tokens: number;
   },
   sessionMode: 'stateful' | 'stateless' = 'stateful',
+  costUsd: number = 0,
 ): Promise<void> {
   await db.execute({
-    sql: `INSERT INTO token_usage (group_folder, input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens, session_mode, recorded_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    sql: `INSERT INTO token_usage (group_folder, input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens, session_mode, cost_usd, recorded_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       groupFolder,
       usage.input_tokens,
@@ -1409,6 +1436,7 @@ export async function recordTokenUsage(
       usage.cache_read_input_tokens,
       usage.output_tokens,
       sessionMode,
+      costUsd,
       new Date().toISOString(),
     ],
   });
@@ -1421,6 +1449,7 @@ export interface TokenUsageSummary {
   total_cache_read: number;
   total_output: number;
   total_tokens: number;
+  total_cost_usd: number;
   turn_count: number;
   stateful_tokens: number;
   stateless_tokens: number;
@@ -1440,6 +1469,9 @@ export async function getTokenUsageSummary(
     SUM(cache_read_tokens) as total_cache_read,
     SUM(output_tokens) as total_output,
     SUM(input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens) as total_tokens,
+    SUM(CASE WHEN COALESCE(cost_usd, 0) > 0 THEN cost_usd
+      ELSE (input_tokens * 3.0 + cache_creation_tokens * 3.75 + cache_read_tokens * 0.30 + output_tokens * 15.0) / 1000000.0
+    END) as total_cost_usd,
     COUNT(*) as turn_count,
     SUM(CASE WHEN session_mode = 'stateful' OR session_mode IS NULL THEN input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens ELSE 0 END) as stateful_tokens,
     SUM(CASE WHEN session_mode = 'stateless' THEN input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens ELSE 0 END) as stateless_tokens,
@@ -1466,7 +1498,7 @@ export async function getTokenUsageSummary(
     args.push(sinceDate);
   }
 
-  sql += ' GROUP BY group_folder ORDER BY total_tokens DESC';
+  sql += ' GROUP BY group_folder ORDER BY total_cost_usd DESC';
 
   const result = await db.execute({ sql, args });
   return result.rows.map((r) => ({
@@ -1476,6 +1508,7 @@ export async function getTokenUsageSummary(
     total_cache_read: Number(r.total_cache_read) || 0,
     total_output: Number(r.total_output) || 0,
     total_tokens: Number(r.total_tokens) || 0,
+    total_cost_usd: Number(r.total_cost_usd) || 0,
     turn_count: Number(r.turn_count) || 0,
     stateful_tokens: Number(r.stateful_tokens) || 0,
     stateless_tokens: Number(r.stateless_tokens) || 0,
@@ -1708,4 +1741,8 @@ export async function dismissAlert(id: number): Promise<void> {
     sql: 'UPDATE agent_alerts SET dismissed = 1 WHERE id = ?',
     args: [id],
   });
+}
+
+export async function dismissAllAlerts(): Promise<void> {
+  await db.execute('UPDATE agent_alerts SET dismissed = 1 WHERE dismissed = 0');
 }

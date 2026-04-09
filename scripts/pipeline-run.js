@@ -32,22 +32,48 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const TEMPLATE_ID = process.argv[2];
-const SHEET_GID   = process.argv[3];
+const TEMPLATE_ID  = process.argv[2];
+const SHEET_GID    = process.argv[3];
+const ROWS_ARG     = process.argv[4] || 'all'; // e.g. "1", "1-10", "1,3,5", "all"
+const LANG_SUFFIX  = process.argv[5] || '';    // e.g. "ru", "de", "fr" — appended to output filenames
+const IMAGES_ARG   = process.env.IMAGES_FILTER || 'all'; // e.g. "1", "1-3", "2,4", "all"
 const SHEET_ID    = '1Y27STGF8NllPUlQQrLAv17EotF_vd09IIVf3MUBKkLs';
 const API_BASE    = process.env.API_BASE || 'http://localhost:3000';
 const TOKEN       = process.env.DASHBOARD_TOKEN || '';
 
-const LOCAL_INPUT  = path.join(__dirname, '..', 'public', 'creatives', 'pipeline', 'input');
-const LOCAL_ASSETS = path.join(__dirname, '..', 'public', 'creatives', 'pipeline', 'assets');
-const LOCAL_OUTPUT = path.join(__dirname, '..', 'public', 'creatives', 'pipeline', 'output');
-const DRIVE_INPUT  = 'gdrive:Devi/Ad Pipeline/Input';
-const DRIVE_ASSETS = 'gdrive:Devi/Ad Pipeline/Assets';
-const DRIVE_OUTPUT = 'gdrive:Devi/Ad Pipeline/Output';
+const INPUT_FOLDER  = process.env.INPUT_FOLDER || '';  // e.g. "Input_1:1", "Input_9:16"
+const OUTPUT_FOLDER = INPUT_FOLDER ? INPUT_FOLDER.replace(/^Input_/, 'Output_') : '';
+// Dimension suffix for filenames: "Input_9:16" → "9_16", "Input_1.91:1" → "1_91_1"
+const DIM_SUFFIX    = INPUT_FOLDER
+  ? INPUT_FOLDER.replace(/^Input_/, '').replace(/[:.]/g, '_').replace(/_+/g, '_').replace(/^_|_$/, '')
+  : '';
+const LOCAL_INPUT   = path.join(__dirname, '..', 'public', 'creatives', 'pipeline', 'input', ...(INPUT_FOLDER ? [INPUT_FOLDER] : []));
+const LOCAL_ASSETS  = path.join(__dirname, '..', 'public', 'creatives', 'pipeline', 'assets');
+// Dimension-specific output subdir prevents cross-contamination between concurrent/sequential runs
+const LOCAL_OUTPUT  = path.join(__dirname, '..', 'public', 'creatives', 'pipeline', 'output', INPUT_FOLDER || '_flat');
+const DRIVE_INPUT   = INPUT_FOLDER ? `gdrive:Devi/Ad Pipeline/${INPUT_FOLDER}` : 'gdrive:Devi/Ad Pipeline/Input';
+const DRIVE_ASSETS  = 'gdrive:Devi/Ad Pipeline/Assets';
+const DRIVE_OUTPUT  = OUTPUT_FOLDER ? `gdrive:Devi/Ad Pipeline/${OUTPUT_FOLDER}` : 'gdrive:Devi/Ad Pipeline/Output';
 
 if (!TEMPLATE_ID || !SHEET_GID) {
-  console.error('Usage: node scripts/pipeline-run.js <template_id> <sheet_gid>');
+  console.error('Usage: node scripts/pipeline-run.js <template_id> <sheet_gid> [rows] [lang]');
   process.exit(1);
+}
+
+/** Parse rows arg → Set of 1-indexed row numbers, or null for all rows */
+function parseRowFilter(arg) {
+  if (!arg || arg === 'all') return null;
+  const indices = new Set();
+  for (const part of arg.split(',')) {
+    const t = part.trim();
+    if (t.includes('-')) {
+      const [start, end] = t.split('-').map(Number);
+      for (let i = start; i <= end; i++) indices.add(i);
+    } else {
+      indices.add(Number(t));
+    }
+  }
+  return indices;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -89,6 +115,23 @@ function slug(str) {
   return str.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').substring(0, 40);
 }
 
+/** Derive short template name from template JSON display name.
+ *  e.g. TemplateA2_1:1 → A2,  TestTemplateC → C */
+function getTemplateShortName(templateId) {
+  const templatePath = path.join(__dirname, '..', 'public', 'creatives', 'templates', `${templateId}.json`);
+  try {
+    const json = JSON.parse(fs.readFileSync(templatePath, 'utf8'));
+    const displayName = (json.name || templateId).replace(/_+$/, '');
+    // Strip dimension suffix (e.g. _1:1, _9:16, _4:5, _1.91:1)
+    const base = displayName.replace(/_(?:1:1|9:16|4:5|1\.91:1|16:9|2:1)$/, '');
+    // Strip everything up to and including "Template" (e.g. TestTemplateC → C)
+    const short = base.replace(/^.*template/i, '');
+    return short || slug(templateId);
+  } catch {
+    return slug(templateId);
+  }
+}
+
 function callExportAPI(templateId, zones) {
   const body = JSON.stringify({ templateId, zones });
   const url = new URL(`${API_BASE}/api/creatives/export`);
@@ -121,8 +164,6 @@ async function main() {
   const t0 = Date.now();
   fs.mkdirSync(LOCAL_INPUT,  { recursive: true });
   fs.mkdirSync(LOCAL_ASSETS, { recursive: true });
-  // Clear local output so stale files from previous runs aren't re-uploaded
-  fs.rmSync(LOCAL_OUTPUT, { recursive: true, force: true });
   fs.mkdirSync(LOCAL_OUTPUT, { recursive: true });
 
   // Step 1: Sync Drive → local (mirror so stale files are cleaned up)
@@ -131,39 +172,99 @@ async function main() {
   rclone('sync', DRIVE_ASSETS, LOCAL_ASSETS);
   const syncTime = Date.now() - t1;
 
-  // Step 2: Read sheet
+  // Step 2: Read sheet (skip if rows=none — template has no text zones)
   const t2 = Date.now();
-  const csvUrl = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${SHEET_GID}`;
-  const csvResp = await fetchUrl(csvUrl);
-  if (csvResp.status !== 200) throw new Error(`Sheet fetch failed: HTTP ${csvResp.status}`);
-  const rows = parseCSV(csvResp.body.toString());
-  const sheetTime = Date.now() - t2;
+  let buttonFile = '';
+  let logoFile   = 'Logo.png';
+  let textCombos;
+  let sheetTime = 0;
 
-  // Extract permutation dimensions
-  const zone2Texts = [...new Set(rows.map(r => r.zone_2_text).filter(Boolean))];
-  const zone3Texts = [...new Set(rows.map(r => r.zone_3_text).filter(Boolean))];
-  const buttonFile = rows.map(r => r.zone_3_src).find(Boolean) || '';
-  const logoFile   = rows.map(r => r.zone_4_src).find(Boolean) || 'Logo.png';
+  if (ROWS_ARG === 'none') {
+    textCombos = [{ z2: '', z3: '', rowNum: 0 }];
+  } else {
+    const csvUrl = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${SHEET_GID}`;
+    const csvResp = await fetchUrl(csvUrl);
+    if (csvResp.status !== 200) throw new Error(`Sheet fetch failed: HTTP ${csvResp.status}`);
+    let rows = parseCSV(csvResp.body.toString());
 
-  // BG images = everything in Input folder
-  const bgImages = fs.readdirSync(LOCAL_INPUT).filter(f => /\.(png|jpg|jpeg|webp)$/i.test(f));
+    // Apply row filter — also track original 1-based sheet row numbers
+    const rowFilter = parseRowFilter(ROWS_ARG);
+    let rowNumbers = rows.map((_, i) => i + 1); // default: all rows
+    if (rowFilter) {
+      const filtered = [], nums = [];
+      rows.forEach((row, i) => { if (rowFilter.has(i + 1)) { filtered.push(row); nums.push(i + 1); } });
+      if (!filtered.length) throw new Error(`No rows matched filter "${ROWS_ARG}"`);
+      rows = filtered;
+      rowNumbers = nums;
+    }
+
+    buttonFile = rows.map(r => r.zone_3_src).find(Boolean) || '';
+    logoFile   = rows.map(r => r.zone_4_src).find(Boolean) || 'Logo.png';
+
+    // Build text combos with row numbers.
+    // ZONE2_TEXTS / ZONE3_TEXTS env vars inject translated text (translate mode).
+    // Each entry: { z2, z3, rowNum } — deduped by text pair, keeping first row number.
+    if (process.env.ZONE2_TEXTS || process.env.ZONE3_TEXTS) {
+      const z2s = process.env.ZONE2_TEXTS ? JSON.parse(process.env.ZONE2_TEXTS) : [''];
+      const z3s = process.env.ZONE3_TEXTS ? JSON.parse(process.env.ZONE3_TEXTS) : [''];
+      // Match translated texts to original row numbers by unique-pair order
+      const pairRowNums = new Map();
+      rows.forEach((r, i) => {
+        const key = `${r.zone_2_text}|||${r.zone_3_text}`;
+        if (!pairRowNums.has(key)) pairRowNums.set(key, rowNumbers[i]);
+      });
+      const uniqueRowNums = [...pairRowNums.values()];
+      textCombos = z2s.map((z2, i) => ({ z2, z3: z3s[i] || '', rowNum: uniqueRowNums[i] ?? i + 1 }));
+    } else {
+      const seen = new Map();
+      rows.forEach((r, i) => {
+        const z2 = (r.zone_2_text || '').replace(/\s*\|\s*/g, '\n');
+        const z3 = (r.zone_3_text || '').replace(/\s*\|\s*/g, '\n');
+        if (!z2 && !z3) return;
+        const key = `${z2}|||${z3}`;
+        if (!seen.has(key)) seen.set(key, { z2, z3, rowNum: rowNumbers[i] });
+      });
+      textCombos = [...seen.values()];
+    }
+    sheetTime = Date.now() - t2;
+  }
+
+  // BG images = everything in Input folder (sorted for consistent 1-based numbering)
+  let bgImages = fs.readdirSync(LOCAL_INPUT).filter(f => /\.(png|jpg|jpeg|webp)$/i.test(f)).sort();
   if (!bgImages.length) throw new Error('No BG images in Drive Input — upload images first.');
 
-  // Build permutations: BG × zone_2 × zone_3
+  // Apply image filter if specified
+  if (IMAGES_ARG && IMAGES_ARG !== 'all') {
+    const imageFilter = parseRowFilter(IMAGES_ARG); // same parse logic: "1", "1-3", "2,4"
+    const filtered = bgImages.filter((_, i) => imageFilter.has(i + 1));
+    if (!filtered.length) throw new Error(`No images matched filter "${IMAGES_ARG}" (folder has ${bgImages.length} images)`);
+    bgImages = filtered;
+  }
+
+  // Build permutations: textCombos × BG images
   const combos = [];
-  for (const bg of bgImages)
-    for (const z2 of zone2Texts)
-      for (const z3 of (zone3Texts.length ? zone3Texts : ['']))
-        combos.push({ bg, z2, z3 });
+  for (const { z2, z3, rowNum } of textCombos)
+    for (const bg of bgImages)
+      combos.push({ bg, z2, z3, rowNum });
 
   // Step 3: Export
   const t3 = Date.now();
   let done = 0, failed = 0;
   const results = [];
 
-  for (const { bg, z2, z3 } of combos) {
-    const outName = `${slug(TEMPLATE_ID)}_${slug(bg)}_${slug(z2)}${z3 ? '_' + slug(z3) : ''}.png`;
-    const zones = { zone_1: { src: `/creatives/pipeline/input/${bg}` }, zone_2: { text: z2 } };
+  const templateShortName = getTemplateShortName(TEMPLATE_ID);
+  for (const { bg, z2, z3, rowNum } of combos) {
+    let bgBase = path.basename(bg, path.extname(bg));
+    // Strip existing dim suffix from source filename to avoid doubling
+    // e.g. "1_9_16" with DIM_SUFFIX "9_16" → strip → "1"
+    if (DIM_SUFFIX && bgBase.endsWith('_' + DIM_SUFFIX)) {
+      bgBase = bgBase.slice(0, -(DIM_SUFFIX.length + 1));
+    }
+    // Format: {image}_{templateShort}_{dimension}[_{lang}].png
+    // e.g. 1_A2_1_1.png  or  1_A2_9_16_ru.png
+    const outName = [bgBase, templateShortName, DIM_SUFFIX, LANG_SUFFIX].filter(Boolean).join('_') + '.png';
+    const inputSrcPath = INPUT_FOLDER ? `/creatives/pipeline/input/${INPUT_FOLDER}/${bg}` : `/creatives/pipeline/input/${bg}`;
+    const zones = { zone_1: { src: inputSrcPath }, zone_2: { text: z2 } };
     if (z3)         zones.zone_3 = { text: z3 };
     if (buttonFile) zones.zone_3 = { ...zones.zone_3, src: `/creatives/pipeline/assets/${buttonFile}` };
     if (logoFile)   zones.zone_4 = { src: `/creatives/pipeline/assets/${logoFile}` };
@@ -183,13 +284,8 @@ async function main() {
   }
   const exportTime = Date.now() - t3;
 
-  // Step 4: Upload to Drive Output
+  // Step 4: Upload to Drive Output (copy only — never delete existing files)
   const t4 = Date.now();
-  // Delete only root-level PNGs (our pipeline's files) before uploading,
-  // to avoid accumulation without needing delete permission on shared subdirs.
-  try {
-    execSync(`rclone delete --include "*.png" --max-depth 1 "${DRIVE_OUTPUT}"`, { stdio: 'pipe' });
-  } catch (_) { /* ignore — may be empty or have no owned files yet */ }
   rclone('copy', LOCAL_OUTPUT, DRIVE_OUTPUT);
   const uploadTime = Date.now() - t4;
 
@@ -206,13 +302,13 @@ async function main() {
     `  Upload       ${elapsed(uploadTime)}`,
     `  Total        ${elapsed(totalTime)}`,
     ``,
-    `Files → gdrive:Devi/Ad Pipeline/Output`,
+    `Files → ${DRIVE_OUTPUT}`,
   ];
   for (const r of results)
     lines.push(r.ok ? `  ✓ ${r.name} (${r.kb}KB, ${elapsed(r.ms)})` : `  ✗ ${r.name}: ${r.error}`);
 
   console.log(lines.join('\n'));
-  if (failed > 0) process.exit(1);
+  process.exit(failed > 0 ? 1 : 0);
 }
 
 main().catch(e => { console.error('Pipeline error:', e.message); process.exit(1); });

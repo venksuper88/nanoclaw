@@ -359,7 +359,7 @@ export class GmailChannel implements Channel {
             sender: senderEmail,
             sender_name: 'Command',
             content: text,
-            timestamp,
+            timestamp: new Date().toISOString(),
             is_from_me: false,
             is_bot_message: true,
           });
@@ -474,7 +474,14 @@ export class GmailChannel implements Channel {
       if (c.data) {
         // Generic key-value formatting for any schema type
         const details = Object.entries(c.data as Record<string, unknown>)
-          .filter(([, v]) => v !== 'NA' && v !== '' && v !== null && v !== undefined && v !== 0)
+          .filter(
+            ([, v]) =>
+              v !== 'NA' &&
+              v !== '' &&
+              v !== null &&
+              v !== undefined &&
+              v !== 0,
+          )
           .map(([k, v]) => `${k}: ${v}`)
           .join('\n');
         if (details) content += `\n\n${details}`;
@@ -508,10 +515,7 @@ export class GmailChannel implements Channel {
           .split(',')
           .map((t) => t.trim().toLowerCase())
           .filter(Boolean);
-        if (
-          !emailType ||
-          !allowedTypes.includes(emailType.toLowerCase())
-        ) {
+        if (!emailType || !allowedTypes.includes(emailType.toLowerCase())) {
           continue; // type doesn't match, skip this rule
         }
       }

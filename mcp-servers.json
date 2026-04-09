@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "craft": {
+      "type": "http",
+      "url": "https://mcp.craft.do/links/FMxyiYwtB8M/mcp"
+    }
+  }
+}

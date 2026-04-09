@@ -1,0 +1,11 @@
+{
+  "name": "ask",
+  "description": "Ask an LLM a question with optional file attachments (PDFs, images, text)",
+  "runtime": "node",
+  "entry": "run.mjs",
+  "timeout": 120,
+  "args": [
+    { "name": "model", "description": "2.5-flash, 2.5-pro, 2.0-flash, 3.1-flash-lite (or: flash, pro)" },
+    { "name": "prompt", "description": "Your question or instruction" }
+  ]
+}

@@ -1,24 +1,51 @@
 {
   "id": "template_1775040755781",
-  "name": "TestTemplateB",
+  "name": "TemplateB_1:1",
   "canvas": {
     "width": 1200,
     "height": 1200
   },
   "zones": [
     {
-      "id": "zone_1775040771010",
-      "type": "text",
-      "label": "Title",
+      "id": "zone_1",
+      "type": "image",
+      "label": "BG",
+      "position": {},
+      "size": {
+        "width": "100%",
+        "height": "100%"
+      }
+    },
+    {
+      "id": "zone_4",
+      "type": "image",
+      "label": "Logo",
       "position": {
-        "top": "10%"
+        "top": "2%",
+        "right": "2%"
       },
       "size": {
-        "width": 400,
-        "height": 200
+        "width": 270,
+        "height": 150
+      }
+    },
+    {
+      "id": "zone_3",
+      "type": "button",
+      "label": "CTA",
+      "position": {
+        "bottom": "8%"
+      },
+      "size": {
+        "width": 460,
+        "height": 180
       },
       "defaultText": "Text here",
-      "style": "goldenHeadline"
+      "style": "whiteButtonText",
+      "textFill": 75,
+      "textFillV": 50,
+      "minFontSize": 60,
+      "textOffsetY": -5
     }
   ]
 }

@@ -27,7 +27,12 @@ export interface IpcDeps {
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
   getAvailableGroups: () => Promise<AvailableGroup[]>;
-  runCommand?: (commandName: string, groupFolder: string, chatJid: string, input: Record<string, unknown>) => Promise<void>;
+  runCommand?: (
+    commandName: string,
+    groupFolder: string,
+    chatJid: string,
+    input: Record<string, unknown>,
+  ) => Promise<void>;
   writeGroupsSnapshot: (
     groupFolder: string,
     isMain: boolean,
@@ -196,10 +201,13 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     await deps.sendMessage(data.chatJid, data.text);
                   }
                   // Persist IPC messages in DB so they survive page refresh.
-                  // Store as non-bot so getMessagesSince picks them up for agent processing.
                   const groupName = targetGroup?.name || sourceGroup;
                   const ipcTimestamp =
                     data.timestamp || new Date().toISOString();
+                  // If agent is sending to its own group, mark as bot message
+                  // so it doesn't get fed back as a "new user message".
+                  const isSelfMessage =
+                    targetGroup && targetGroup.folder === sourceGroup;
                   storeMessage({
                     id: `ipc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
                     chat_jid: data.chatJid,
@@ -207,12 +215,14 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     sender_name: data.sender || groupName,
                     content: data.text,
                     timestamp: ipcTimestamp,
-                    is_from_me: false,
+                    is_from_me: !!isSelfMessage,
+                    is_bot_message: !!isSelfMessage,
                   }).catch((err) =>
                     logger.warn({ err }, 'Failed to store IPC message'),
                   );
                   // Trigger agent processing for the target group
-                  if (deps.enqueueMessageCheck) {
+                  // (only for cross-agent messages, not self-messages)
+                  if (deps.enqueueMessageCheck && !isSelfMessage) {
                     deps.enqueueMessageCheck(data.chatJid);
                   }
                   logger.info(
@@ -665,7 +675,11 @@ export async function processTaskIpc(
         data: data.data || null,
         status: 'pending',
         priority: data.priority || 'medium',
-        due_date: data.due_date ? new Date(data.due_date).toISOString() : null,
+        due_date: data.due_date
+          ? new Date(data.due_date).toISOString()
+          : data.recurrence
+            ? new Date().toISOString()
+            : null,
         remind_at: data.remind_at
           ? new Date(data.remind_at).toISOString()
           : null,

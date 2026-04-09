@@ -140,7 +140,9 @@ router.post('/export', async (req: Request, res: Response) => {
   // Include full template + styles in export_data so ExportCanvas doesn't need to fetch
   let styles: Record<string, unknown> = {};
   if (fs.existsSync(STYLES_PATH)) {
-    try { styles = JSON.parse(fs.readFileSync(STYLES_PATH, 'utf8')); } catch {}
+    try {
+      styles = JSON.parse(fs.readFileSync(STYLES_PATH, 'utf8'));
+    } catch {}
   }
   const exportData = Buffer.from(
     JSON.stringify({
@@ -190,7 +192,9 @@ router.post('/export', async (req: Request, res: Response) => {
         const raw = Buffer.isBuffer(png) ? png : Buffer.from(png as Uint8Array);
         // Downscale 2x screenshot back to target canvas size (Lanczos3 = high quality)
         const buf = await sharp(raw)
-          .resize(template.canvas.width, template.canvas.height, { kernel: 'lanczos3' })
+          .resize(template.canvas.width, template.canvas.height, {
+            kernel: 'lanczos3',
+          })
           .png()
           .toBuffer();
         resolve({ ok: true, buf });

@@ -1,27 +1,44 @@
 [
   {
     "type": "FinancialTransaction",
-    "description": "Bank alerts, UPI payments, credit card transactions, EMI debits, mandates, refunds",
-    "classificationPrompt": "Classify as FinancialTransaction if the email is about money movement — debits, credits, refunds, reversals, mandates, subscriptions, EMIs, salary credits, or any bank/payment app notification about a financial transaction. Includes UPI, NEFT, IMPS, credit card statements, loan EMIs, and e-mandate registrations.",
+    "description": "Bank alerts, UPI payments, credit card transactions, EMI debits, mandates, refunds, EEFC inward remittances",
+    "classificationPrompt": "Classify as FinancialTransaction if the email is a bank or payment alert about money movement — debits, credits, refunds, reversals, mandates, EMIs, salary credits, UPI/NEFT/IMPS/RTGS, credit card charges, or EEFC inward remittances. Includes HDFC, IDFC First, and any bank alert. Do NOT classify as FinancialTransaction if it is a platform invoice or billing statement.",
     "fields": {
       "mandatory": {
         "transactionType": "one of: debit, credit, refund, reversal, emi, mandate, subscription",
-        "amount": "numeric amount (0 if truly unknown)",
-        "currency": "e.g. INR, USD",
-        "transactionDateTime": "ISO 8601 format (use email date if transaction date not stated)"
+        "amount": "numeric amount only (0 if unknown)",
+        "currency": "INR or USD",
+        "transactionDateTime": "ISO 8601 (use email date if not stated)"
       },
       "optional": {
-        "merchant": "payee/merchant name",
-        "accountNumber": "masked account/card number as shown in email",
-        "bankName": "bank or financial institution",
-        "referenceId": "UTR, reference number, order ID",
-        "upiId": "UPI VPA if applicable",
-        "cardLast4": "last 4 digits of card",
+        "merchant": "payee or sender name as written in email",
+        "accountNumber": "masked account/card number as shown",
+        "cardLast4": "last 4 digits of credit card if CC transaction",
+        "referenceId": "UPI ref, UTR, or transaction reference number",
+        "upiId": "UPI VPA if UPI transaction",
         "status": "completed, pending, scheduled, failed",
-        "category": "food, travel, subscription, utility, transfer, salary, investment, insurance, loan, other",
-        "balanceAfter": "remaining balance if shown",
-        "description": "brief note from email context",
-        "isRecurring": "true/false"
+        "activityMonth": "YYYY-MM — the earning/activity month this payment is for (e.g. if email says 'February earnings' or 'Feb 2026 activity'). NA if not mentioned.",
+        "networkKey": "for EEFC inward credits only — one of: applovin, google_adrev, google_play, meta, apple, unity, mintegral, ironsource, yandex, voodoo. Use google_adrev for AdMob/Google Asia Pacific Pte Ltd, google_play for Google Play IAP (IndiaIdeas.com Limited). NA for non-EEFC transactions.",
+        "eefcCurrency": "for EEFC inward credits: always USD unless explicitly stated otherwise. NA for non-EEFC transactions."
+      }
+    }
+  },
+  {
+    "type": "UAInvoice",
+    "description": "Billing invoices from UA ad platforms — Google Ads, Meta/Facebook, Unity, Mintegral",
+    "classificationPrompt": "Classify as UAInvoice if the email is an actual billing invoice or statement from Google Ads, Meta/Facebook Ads, Unity Ads, or Mintegral. Must show an invoice number or billing period with a total amount due. Do NOT classify payment confirmation emails or bank debit alerts as UAInvoice.",
+    "fields": {
+      "mandatory": {
+        "platform": "one of: google_ads, meta, unity, mintegral",
+        "billingMonth": "YYYY-MM billing period",
+        "totalAmount": "total invoice amount as a number",
+        "currency": "INR or USD"
+      },
+      "optional": {
+        "igstAmount": "IGST or tax amount (for INR invoices under reverse charge)",
+        "netAmount": "amount before tax / ex-GST amount",
+        "invoiceNumber": "invoice or statement ID",
+        "notes": "any relevant context or notes"
       }
     }
   }

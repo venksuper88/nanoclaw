@@ -24,24 +24,39 @@ export function loadEmailSchemas(): EmailSchemaDefinition[] {
         const raw = fs.readFileSync(schemaPath, 'utf-8');
         const defs = JSON.parse(raw) as EmailSchemaDefinition[];
         if (!Array.isArray(defs)) {
-          logger.warn({ folder: dir.name }, 'email-schemas.json is not an array');
+          logger.warn(
+            { folder: dir.name },
+            'email-schemas.json is not an array',
+          );
           continue;
         }
         for (const def of defs) {
           if (!def.type || !def.classificationPrompt || !def.fields) {
-            logger.warn({ folder: dir.name, type: def.type }, 'Invalid email schema — missing required fields');
+            logger.warn(
+              { folder: dir.name, type: def.type },
+              'Invalid email schema — missing required fields',
+            );
             continue;
           }
           if (seenTypes.has(def.type)) {
-            logger.debug({ folder: dir.name, type: def.type }, 'Duplicate email schema type, skipping');
+            logger.debug(
+              { folder: dir.name, type: def.type },
+              'Duplicate email schema type, skipping',
+            );
             continue;
           }
           seenTypes.add(def.type);
           schemas.push(def);
         }
-        logger.debug({ folder: dir.name, count: defs.length }, 'Loaded email schemas');
+        logger.debug(
+          { folder: dir.name, count: defs.length },
+          'Loaded email schemas',
+        );
       } catch (err) {
-        logger.warn({ err, folder: dir.name }, 'Failed to parse email-schemas.json');
+        logger.warn(
+          { err, folder: dir.name },
+          'Failed to parse email-schemas.json',
+        );
       }
     }
   } catch (err) {
@@ -54,8 +69,12 @@ export function loadEmailSchemas(): EmailSchemaDefinition[] {
 /**
  * Build the Gemini classification prompt from all registered schemas.
  */
-export function buildClassificationPrompt(schemas: EmailSchemaDefinition[]): string {
-  const typeList = schemas.map((s) => `- ${s.type}: ${s.description}`).join('\n');
+export function buildClassificationPrompt(
+  schemas: EmailSchemaDefinition[],
+): string {
+  const typeList = schemas
+    .map((s) => `- ${s.type}: ${s.description}`)
+    .join('\n');
   const typeNames = schemas.map((s) => s.type);
 
   // Build per-type classification guidance

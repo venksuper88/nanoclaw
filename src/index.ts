@@ -274,6 +274,58 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   });
   if (cmdResult.handled) return cmdResult.success;
 
+  // Intercept ! commands (scripts) before they reach the agent.
+  // Skip is_from_me messages — the dashboard route already handled those.
+  const lastMsg = missedMessages[missedMessages.length - 1];
+  if (lastMsg && !lastMsg.is_from_me && lastMsg.content.trim().startsWith('!')) {
+    const text = lastMsg.content.trim();
+    const parts = text.slice(1).trim().split(/\s+/);
+    const commandName = parts[0];
+    if (commandName) {
+      const { runCommand: execCommand, resolveCommand: resolveCmd, mapArgsToInput } =
+        await import('./commands.js');
+      const resolved = resolveCmd(commandName, group.folder);
+      if (resolved) {
+        const sendMsg = async (msg: string) => {
+          const agentName = group.name || ASSISTANT_NAME;
+          const msgId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const timestamp = new Date().toISOString();
+          storeMessage({
+            id: msgId,
+            chat_jid: chatJid,
+            sender: agentName,
+            sender_name: agentName,
+            content: msg,
+            timestamp,
+            is_from_me: false,
+            is_bot_message: true,
+          }).catch(() => {});
+          dashboardEvents.emitEvent('message:new', {
+            chatJid,
+            sender: agentName,
+            senderName: agentName,
+            content: msg,
+            timestamp,
+            isFromMe: false,
+          });
+        };
+        // Advance cursor so the command message isn't re-processed
+        lastAgentTimestamp[chatJid] = lastMsg.timestamp;
+        saveState().catch(() => {});
+        execCommand({
+          commandName,
+          groupFolder: group.folder,
+          chatJid,
+          input: mapArgsToInput(resolved.def.args, parts.slice(1)),
+          sendMessage: sendMsg,
+        }).catch((err) =>
+          logger.warn({ err, commandName }, 'Orchestrator ! command failed'),
+        );
+        return true;
+      }
+    }
+  }
+
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
     const allowlistCfg = loadSenderAllowlist();
@@ -293,10 +345,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Determine stateless mode: explicit toggle from dashboard, or email-forwarded messages
   // Gmail forwards emails with sender = email address (contains @)
-  const isEmailMessage = missedMessages.some((m) => !m.is_from_me && m.sender.includes('@'));
-  const isStateless =
-    statelessPending[chatJid] === true ||
-    isEmailMessage;
+  const isEmailMessage = missedMessages.some(
+    (m) => !m.is_from_me && m.sender.includes('@'),
+  );
+  const isStateless = statelessPending[chatJid] === true || isEmailMessage;
   if (statelessPending[chatJid]) delete statelessPending[chatJid];
 
   // Memory: start session tracking and enrich with relevant memories
@@ -304,7 +356,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let prompt: string;
   if (isStateless) {
     prompt = rawPrompt;
-    logger.info({ group: group.name }, 'Stateless turn — skipping memory enrichment');
+    logger.info(
+      { group: group.name },
+      'Stateless turn — skipping memory enrichment',
+    );
   } else {
     memoryService.startSession(group.folder);
     prompt = await memoryService.enrichMessage(
@@ -359,170 +414,181 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const sessionMode = isStateless ? 'stateless' as const : 'stateful' as const;
-  const output = await runAgent(group, prompt, chatJid, isStateless, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text) {
-        memoryService.accumulateOutput(group.folder, text);
-        // Skip agent:output emission if streaming already delivered this to the dashboard
-        if (!result.streamed) {
-          dashboardEvents.emitEvent('agent:output', {
-            groupName: group.name,
-            groupFolder: group.folder,
-            text,
-          });
-        }
-        // Store agent response in DB — skip if streamed (already stored per-chunk)
-        if (!result.streamed) {
-          const agentMsgId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-          await storeMessage({
-            id: agentMsgId,
-            chat_jid: chatJid,
-            sender: group.name,
-            sender_name: group.name,
-            content: text,
-            timestamp: new Date().toISOString(),
-            is_from_me: true,
-            is_bot_message: true,
-          }).catch((err) => logger.warn({ err }, 'storeMessage failed'));
-        }
-        await channel?.sendMessage(chatJid, text);
-        outputSentToUser = true;
-      }
-      // Emit context usage from Claude Code's statusLine output (context.json)
-      try {
-        const contextFile = path.join(
-          resolveGroupIpcPath(group.folder),
-          'context.json',
-        );
-        if (fs.existsSync(contextFile)) {
-          const ctx = JSON.parse(fs.readFileSync(contextFile, 'utf-8'));
-          const cw = ctx.context_window || {};
-          const percent = cw.used_percentage ?? 0;
-          if (percent > 0) {
-            const tokens =
-              (cw.current_usage?.input_tokens ?? 0) +
-              (cw.current_usage?.cache_creation_input_tokens ?? 0) +
-              (cw.current_usage?.cache_read_input_tokens ?? 0);
-            dashboardEvents.emitEvent('context:update', {
+  const sessionMode = isStateless
+    ? ('stateless' as const)
+    : ('stateful' as const);
+  const output = await runAgent(
+    group,
+    prompt,
+    chatJid,
+    isStateless,
+    async (result) => {
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
+        if (text) {
+          memoryService.accumulateOutput(group.folder, text);
+          // Skip agent:output emission if streaming already delivered this to the dashboard
+          if (!result.streamed) {
+            dashboardEvents.emitEvent('agent:output', {
+              groupName: group.name,
               groupFolder: group.folder,
-              percent,
-              sizeKB: Math.round((tokens * 4) / 1024),
+              text,
             });
           }
+          // Store agent response in DB — skip if streamed (already stored per-chunk)
+          if (!result.streamed) {
+            const agentMsgId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+            await storeMessage({
+              id: agentMsgId,
+              chat_jid: chatJid,
+              sender: group.name,
+              sender_name: group.name,
+              content: text,
+              timestamp: new Date().toISOString(),
+              is_from_me: true,
+              is_bot_message: true,
+            }).catch((err) => logger.warn({ err }, 'storeMessage failed'));
+          }
+          await channel?.sendMessage(chatJid, text);
+          outputSentToUser = true;
         }
-      } catch {
-        /* ignore */
-      }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
-
-    // Emit context usage — always, even without result text
-    if (result.usage) {
-      const totalTokens =
-        (result.usage.input_tokens ?? 0) +
-        (result.usage.cache_creation_input_tokens ?? 0) +
-        (result.usage.cache_read_input_tokens ?? 0);
-      const contextWindowSize = result.usage.contextWindow || 200_000; // From result event, fallback 200K
-      const percent = Math.round((totalTokens / contextWindowSize) * 100);
-      if (percent > 0) {
-        const sizeKB = Math.round((totalTokens * 4) / 1024);
-        dashboardEvents.emitEvent('context:update', {
-          groupFolder: group.folder,
-          percent,
-          sizeKB,
-        });
-        contextCache[group.folder] = { percent, sizeKB, tokens: totalTokens };
-        // Persist to DB so it survives restarts
-        setRouterState(
-          `context_pct:${group.folder}`,
-          JSON.stringify({ percent, sizeKB, tokens: totalTokens }),
-        ).catch(() => {});
-      }
-      // Record token usage for analytics (tagged with session mode)
-      recordTokenUsage(group.folder, result.usage, sessionMode).catch(() => {});
-    }
-
-    // Performance alerts — check thresholds and emit alerts
-    if (result.performance) {
-      const perf = result.performance;
-      const alerts: Array<{ type: string; message: string }> = [];
-
-      if (perf.durationMs > 180_000) {
-        // > 3 min wall time
-        const mins = (perf.durationMs / 60_000).toFixed(1);
-        alerts.push({
-          type: 'slow_response',
-          message: `${group.name} took ${mins}min (${perf.numTurns} turns, $${perf.costUsd.toFixed(2)})`,
-        });
-      }
-      if (perf.numTurns > 10) {
-        alerts.push({
-          type: 'high_turns',
-          message: `${group.name} used ${perf.numTurns} turns — likely over-orchestrating`,
-        });
-      }
-      if (perf.costUsd > 0.5) {
-        // > $0.50 per invocation
-        alerts.push({
-          type: 'high_cost',
-          message: `${group.name} cost $${perf.costUsd.toFixed(2)} in a single invocation`,
-        });
+        // Emit context usage from Claude Code's statusLine output (context.json)
+        try {
+          const contextFile = path.join(
+            resolveGroupIpcPath(group.folder),
+            'context.json',
+          );
+          if (fs.existsSync(contextFile)) {
+            const ctx = JSON.parse(fs.readFileSync(contextFile, 'utf-8'));
+            const cw = ctx.context_window || {};
+            const percent = cw.used_percentage ?? 0;
+            if (percent > 0) {
+              const tokens =
+                (cw.current_usage?.input_tokens ?? 0) +
+                (cw.current_usage?.cache_creation_input_tokens ?? 0) +
+                (cw.current_usage?.cache_read_input_tokens ?? 0);
+              dashboardEvents.emitEvent('context:update', {
+                groupFolder: group.folder,
+                percent,
+                sizeKB: Math.round((tokens * 4) / 1024),
+              });
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
       }
 
-      // Context % alert
-      const contextPct = contextCache[group.folder]?.percent ?? 0;
-      if (contextPct > 80) {
-        alerts.push({
-          type: 'high_context',
-          message: `${group.name} at ${contextPct}% context — consider /compact or /new`,
-        });
+      // Emit context usage — always, even without result text
+      if (result.usage) {
+        const totalTokens =
+          (result.usage.input_tokens ?? 0) +
+          (result.usage.cache_creation_input_tokens ?? 0) +
+          (result.usage.cache_read_input_tokens ?? 0);
+        const contextWindowSize = result.usage.contextWindow || 200_000; // From result event, fallback 200K
+        const percent = Math.round((totalTokens / contextWindowSize) * 100);
+        if (percent > 0) {
+          const sizeKB = Math.round((totalTokens * 4) / 1024);
+          dashboardEvents.emitEvent('context:update', {
+            groupFolder: group.folder,
+            percent,
+            sizeKB,
+          });
+          contextCache[group.folder] = { percent, sizeKB, tokens: totalTokens };
+          // Persist to DB so it survives restarts
+          setRouterState(
+            `context_pct:${group.folder}`,
+            JSON.stringify({ percent, sizeKB, tokens: totalTokens }),
+          ).catch(() => {});
+        }
+        // Record token usage for analytics (tagged with session mode + actual cost)
+        const costUsd = result.performance?.costUsd ?? 0;
+        recordTokenUsage(group.folder, result.usage, sessionMode, costUsd).catch(
+          () => {},
+        );
       }
 
-      for (const alert of alerts) {
-        const timestamp = new Date().toISOString();
-        insertAlert({
-          group_folder: group.folder,
-          group_name: group.name,
-          type: alert.type,
-          message: alert.message,
-          duration_ms: perf.durationMs,
-          num_turns: perf.numTurns,
-          cost_usd: perf.costUsd,
-          context_percent: contextPct,
-          created_at: timestamp,
-        }).catch(() => {});
-        dashboardEvents.emitEvent('agent:alert', {
+      // Performance alerts — check thresholds and emit alerts
+      if (result.performance) {
+        const perf = result.performance;
+        const alerts: Array<{ type: string; message: string }> = [];
+
+        if (perf.durationMs > 180_000) {
+          // > 3 min wall time
+          const mins = (perf.durationMs / 60_000).toFixed(1);
+          alerts.push({
+            type: 'slow_response',
+            message: `${group.name} took ${mins}min (${perf.numTurns} turns, $${perf.costUsd.toFixed(2)})`,
+          });
+        }
+        if (perf.numTurns > 10) {
+          alerts.push({
+            type: 'high_turns',
+            message: `${group.name} used ${perf.numTurns} turns — likely over-orchestrating`,
+          });
+        }
+        if (perf.costUsd > 0.5) {
+          // > $0.50 per invocation
+          alerts.push({
+            type: 'high_cost',
+            message: `${group.name} cost $${perf.costUsd.toFixed(2)} in a single invocation`,
+          });
+        }
+
+        // Context % alert
+        const contextPct = contextCache[group.folder]?.percent ?? 0;
+        if (contextPct > 80) {
+          alerts.push({
+            type: 'high_context',
+            message: `${group.name} at ${contextPct}% context — consider /compact or /new`,
+          });
+        }
+
+        for (const alert of alerts) {
+          const timestamp = new Date().toISOString();
+          insertAlert({
+            group_folder: group.folder,
+            group_name: group.name,
+            type: alert.type,
+            message: alert.message,
+            duration_ms: perf.durationMs,
+            num_turns: perf.numTurns,
+            cost_usd: perf.costUsd,
+            context_percent: contextPct,
+            created_at: timestamp,
+          }).catch(() => {});
+          dashboardEvents.emitEvent('agent:alert', {
+            groupName: group.name,
+            groupFolder: group.folder,
+            type: alert.type as any,
+            message: alert.message,
+            timestamp,
+          });
+        }
+      }
+
+      if (result.status === 'success') {
+        queue.notifyIdle(chatJid);
+        dashboardEvents.emitEvent('agent:idle', {
           groupName: group.name,
           groupFolder: group.folder,
-          type: alert.type as any,
-          message: alert.message,
-          timestamp,
         });
       }
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-      dashboardEvents.emitEvent('agent:idle', {
-        groupName: group.name,
-        groupFolder: group.folder,
-      });
-    }
-
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
+      if (result.status === 'error') {
+        hadError = true;
+      }
+    },
+  );
 
   await channel?.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
@@ -565,7 +631,11 @@ async function runAgent(
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   // Stateless mode: force fresh session (no --resume), don't use stored session ID
-  const sessionId = stateless ? undefined : (group.isTransient ? undefined : sessions[group.folder]);
+  const sessionId = stateless
+    ? undefined
+    : group.isTransient
+      ? undefined
+      : sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = await getAllTasks();
@@ -708,6 +778,16 @@ async function runAgent(
       groupFolder: group.folder,
       duration: Date.now() - agentStart,
     });
+
+    // Clear stale session if resume failed — prevents infinite retry loop
+    if (output.sessionInvalid) {
+      logger.warn(
+        { folder: group.folder },
+        'Clearing invalid session ID — will start fresh on next message',
+      );
+      delete sessions[group.folder];
+      setSession(group.folder, '').catch(() => {});
+    }
 
     // Track session for resume — skip for stateless turns to preserve the main session
     if (output.newSessionId && !group.isTransient && !stateless) {
@@ -987,6 +1067,94 @@ async function checkAndSendOnlineNotification(): Promise<void> {
   );
 }
 
+/**
+ * Recover orphaned prompt files left behind when the orchestrator
+ * was killed mid-dispatch. Fresh prompts (< 2 min) are re-enqueued;
+ * stale ones are discarded and a notification is sent to the group.
+ */
+function recoverOrphanedPrompts(): void {
+  const STALE_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes
+  const now = Date.now();
+
+  for (const [jid, group] of Object.entries(registeredGroups)) {
+    let inputDir: string;
+    try {
+      inputDir = path.join(resolveGroupIpcPath(group.folder), 'input');
+    } catch {
+      continue;
+    }
+    if (!fs.existsSync(inputDir)) continue;
+
+    const promptFiles = fs
+      .readdirSync(inputDir)
+      .filter((f) => f.startsWith('prompt-') && f.endsWith('.txt'));
+
+    for (const pf of promptFiles) {
+      // Extract nonce: prompt-{nonce}.txt → done-{nonce}.json
+      const nonce = pf.slice('prompt-'.length, -'.txt'.length);
+      const doneFile = path.join(inputDir, `done-${nonce}.json`);
+
+      if (fs.existsSync(doneFile)) continue; // Already processed
+
+      const promptPath = path.join(inputDir, pf);
+      const age = now - fs.statSync(promptPath).mtimeMs;
+
+      if (age < STALE_THRESHOLD_MS) {
+        // Fresh — re-enqueue so the message loop picks it up
+        logger.info(
+          { folder: group.folder, file: pf, ageMs: age },
+          'Re-enqueuing fresh orphaned prompt',
+        );
+        queue.enqueueMessageCheck(jid);
+      } else {
+        // Stale — discard and notify
+        let preview = '';
+        try {
+          const content = fs.readFileSync(promptPath, 'utf-8');
+          // Extract last message content for the notification
+          const msgMatch = content.match(/<message[^>]*>([^<]*)<\/message>/g);
+          if (msgMatch) {
+            const last = msgMatch[msgMatch.length - 1];
+            preview = last.replace(/<[^>]+>/g, '').trim().slice(0, 80);
+          }
+        } catch { /* ignore */ }
+
+        logger.warn(
+          { folder: group.folder, file: pf, ageMs: age },
+          'Discarding stale orphaned prompt',
+        );
+        fs.unlinkSync(promptPath);
+
+        // Notify the group
+        const agentName = group.name || ASSISTANT_NAME;
+        const msgId = `svc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const timestamp = new Date().toISOString();
+        const notifyText = preview
+          ? `Missed message during restart: "${preview}". Please resend if still needed.`
+          : 'A message was lost during restart. Please resend if needed.';
+        storeMessage({
+          id: msgId,
+          chat_jid: jid,
+          sender: agentName,
+          sender_name: agentName,
+          content: notifyText,
+          timestamp,
+          is_from_me: true,
+          is_bot_message: true,
+        }).catch(() => {});
+        dashboardEvents.emitEvent('message:new', {
+          chatJid: jid,
+          sender: agentName,
+          senderName: agentName,
+          content: notifyText,
+          timestamp,
+          isFromMe: false,
+        });
+      }
+    }
+  }
+}
+
 async function main(): Promise<void> {
   // Recover existing tmux sessions (they survive DevenClaw restarts)
   const recoveredTmux = recoverTmuxSessions();
@@ -998,6 +1166,9 @@ async function main(): Promise<void> {
   await initDashboardTokens();
   await initPushService();
   await loadState();
+
+  // Recover orphaned prompts from interrupted restarts
+  recoverOrphanedPrompts();
   await memoryService.init();
   // Set owner groups so memory scoping knows which groups get full access
   const ownerFolders = Object.values(registeredGroups)
@@ -1405,11 +1576,33 @@ async function main(): Promise<void> {
           const agentName = grp?.name || ASSISTANT_NAME;
           const msgId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const timestamp = new Date().toISOString();
-          storeMessage({ id: msgId, chat_jid: chatJid, sender: agentName, sender_name: agentName, content: text, timestamp, is_from_me: false, is_bot_message: true }).catch(() => {});
-          dashboardEvents.emitEvent('message:new', { chatJid, sender: agentName, senderName: agentName, content: text, timestamp, isFromMe: false });
+          storeMessage({
+            id: msgId,
+            chat_jid: chatJid,
+            sender: agentName,
+            sender_name: agentName,
+            content: text,
+            timestamp,
+            is_from_me: false,
+            is_bot_message: true,
+          }).catch(() => {});
+          dashboardEvents.emitEvent('message:new', {
+            chatJid,
+            sender: agentName,
+            senderName: agentName,
+            content: text,
+            timestamp,
+            isFromMe: false,
+          });
         }
       };
-      runCommand({ commandName, groupFolder, chatJid, input, sendMessage: sendMsg }).catch((err) =>
+      runCommand({
+        commandName,
+        groupFolder,
+        chatJid,
+        input,
+        sendMessage: sendMsg,
+      }).catch((err) =>
         logger.warn({ err, commandName, groupFolder }, 'runCommand failed'),
       );
     },

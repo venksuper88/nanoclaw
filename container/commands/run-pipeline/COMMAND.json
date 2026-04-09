@@ -1,0 +1,13 @@
+{
+  "name": "run-pipeline",
+  "description": "Internal: run pipeline-run.js for a given template family + input folder. Called by pipeline-1x1, pipeline-9x16, etc.",
+  "timeout": 300,
+  "args": [
+    { "name": "template",      "description": "Template family name, e.g. TemplateC, TemplateB", "required": true },
+    { "name": "rows",          "description": "Row selection: 1, 1-10, 1,3,5, all, or none", "required": true },
+    { "name": "input_folder",  "description": "Drive Input folder name, e.g. Input_1:1, Input_9:16", "required": true },
+    { "name": "images",        "description": "Image filter: 1, 1-3, 2,4, or all (default: all)", "required": false },
+    { "name": "gid",           "description": "Override sheet GID", "required": false },
+    { "name": "lang",          "description": "Language suffix for output filenames, e.g. ru, de", "required": false }
+  ]
+}

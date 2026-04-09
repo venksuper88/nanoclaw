@@ -38,6 +38,7 @@ export interface RegisteredGroup {
   model?: 'opus' | 'sonnet'; // Claude model to use (default: opus)
   contextWindow?: '200k' | '1m'; // Context window size (default: 200k)
   allowedMcpServers?: string[]; // MCP server names to load from ~/.claude.json. Empty = none (only nanoclaw). ['__all__'] = all.
+  disabledTools?: string[]; // Nanoclaw MCP tool names to disable for this group. Empty = all tools enabled.
   gmailFilter?: { subjectContains?: string[]; fromContains?: string[] }; // Route matching emails here instead of main group
 }
 

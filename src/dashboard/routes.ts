@@ -29,8 +29,8 @@ import {
   deleteTask,
   updateDashboardToken,
   createTodo,
-  getTodoById,
   getAllTodos,
+  getTodoById,
   updateTodo,
   deleteTodo,
   getAllScopeDefs,
@@ -48,6 +48,7 @@ import {
   getEmailLog,
   getAlerts,
   dismissAlert,
+  dismissAllAlerts,
 } from '../db.js';
 import {
   getTenjinSnapshot,
@@ -364,9 +365,10 @@ export async function createRouter(): Promise<Router> {
       const commandName = parts[0];
       const group = groups[chatJid];
       if (commandName && group) {
-        const { runCommand: execCommand, resolveCommand: resolveCmd } =
+        const { runCommand: execCommand, resolveCommand: resolveCmd, mapArgsToInput } =
           await import('../commands.js');
-        if (resolveCmd(commandName, group.folder)) {
+        const resolved = resolveCmd(commandName, group.folder);
+        if (resolved) {
           // Store the user's command message in DB for chat history
           storeMessage({
             id: `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -407,7 +409,7 @@ export async function createRouter(): Promise<Router> {
             commandName,
             groupFolder: group.folder,
             chatJid,
-            input: { args: parts.slice(1).join(' '), sender: user.name },
+            input: mapArgsToInput(resolved.def.args, parts.slice(1), user.name),
             sendMessage: sendMsg,
           }).catch((err) =>
             logger.warn(
@@ -993,6 +995,7 @@ export async function createRouter(): Promise<Router> {
           idleTimeoutMinutes: group.idleTimeoutMinutes ?? null,
           allowedSkills: group.allowedSkills || [],
           allowedMcpServers: group.allowedMcpServers || [],
+          disabledTools: group.disabledTools || [],
           model: group.model || 'opus',
           contextWindow: group.contextWindow || '200k',
           tokens,
@@ -1041,6 +1044,8 @@ export async function createRouter(): Promise<Router> {
       const allowedMcpServers = req.body.allowedMcpServers;
       if (allowedMcpServers !== undefined)
         updated.allowedMcpServers = allowedMcpServers;
+      const disabledTools = req.body.disabledTools;
+      if (disabledTools !== undefined) updated.disabledTools = disabledTools;
       if (mode !== undefined && mode === 'tmux') updated.mode = mode;
       if (requiresTrigger !== undefined)
         updated.requiresTrigger = requiresTrigger;
@@ -1380,12 +1385,13 @@ export async function createRouter(): Promise<Router> {
   });
 
   // ── Commands (for chat autocomplete) ──
-  router.get('/api/commands', (req: Request, res: Response) => {
+  router.get('/api/commands', async (req: Request, res: Response) => {
     const groupFolder = req.query.folder as string | undefined;
     const commands: Array<{
       command: string;
       description: string;
       prefix?: string;
+      args?: Array<{ name: string; description?: string; required?: boolean }>;
     }> = [
       {
         command: 'new',
@@ -1394,13 +1400,24 @@ export async function createRouter(): Promise<Router> {
       { command: 'compact', description: 'Force context compaction' },
       { command: 'context', description: 'Show context window usage' },
     ];
-    const skillDirs = [
+    // Skill dirs: container + global + workDir project skills
+    const seenSkillNames = new Set<string>();
+    const skillSearchDirs: string[] = [
       path.resolve(process.cwd(), 'container', 'skills'),
-      path.resolve(process.cwd(), '.claude', 'skills'),
+      path.join(os.homedir(), '.claude', 'skills'),
     ];
-    for (const dir of skillDirs) {
+    if (groupFolder) {
+      const allGroups = await getAllRegisteredGroups();
+      const group = Object.values(allGroups).find(g => g.folder === groupFolder);
+      if (group?.workDir) {
+        skillSearchDirs.push(path.resolve(group.workDir, '.claude', 'skills'));
+      }
+    }
+
+    for (const dir of skillSearchDirs) {
       if (!fs.existsSync(dir)) continue;
       for (const name of fs.readdirSync(dir)) {
+        if (seenSkillNames.has(name)) continue;
         const skillFile = path.join(dir, name, 'SKILL.md');
         if (!fs.existsSync(skillFile)) continue;
         try {
@@ -1408,6 +1425,7 @@ export async function createRouter(): Promise<Router> {
             fs.readFileSync(skillFile, 'utf-8'),
           );
           if (parsed.name) {
+            seenSkillNames.add(name);
             commands.push({
               command: parsed.name,
               description: (parsed.description || '').slice(0, 100),
@@ -1426,6 +1444,7 @@ export async function createRouter(): Promise<Router> {
           command: cmd.name,
           description: cmd.description,
           prefix: '!',
+          args: cmd.args,
         });
       }
     }
@@ -1463,22 +1482,21 @@ export async function createRouter(): Promise<Router> {
           addServer(name, config, 'global');
         }
       }
-      // Project-scoped MCP servers from .mcp.json in group workDirs
+      // Project-scoped MCP servers from .mcp.json in group workDirs (walk up tree)
       const groups = await getAllRegisteredGroups();
-      const scannedDirs = new Set<string>();
+      const scannedFiles = new Set<string>();
       for (const group of Object.values(groups)) {
         if (!group.workDir) continue;
-        const resolvedDir = path.resolve(group.workDir);
-        if (scannedDirs.has(resolvedDir)) continue;
-        scannedDirs.add(resolvedDir);
-        const mcpJson = path.join(resolvedDir, '.mcp.json');
-        if (fs.existsSync(mcpJson)) {
+        const { findMcpJsonFiles } = await import('../tmux-runner.js');
+        for (const mcpJson of findMcpJsonFiles(path.resolve(group.workDir))) {
+          if (scannedFiles.has(mcpJson)) continue;
+          scannedFiles.add(mcpJson);
           try {
             const parsed = JSON.parse(fs.readFileSync(mcpJson, 'utf-8'));
             for (const [name, config] of Object.entries(
               parsed.mcpServers || {},
             )) {
-              addServer(name, config, resolvedDir);
+              addServer(name, config, path.dirname(mcpJson));
             }
           } catch {}
         }
@@ -1648,61 +1666,106 @@ export async function createRouter(): Promise<Router> {
     },
   );
 
-  // ── Skills ──
-  router.get('/api/skills', (_req: Request, res: Response) => {
+  router.post('/api/alerts/dismiss-all', async (_req: Request, res: Response) => {
+    try {
+      await dismissAllAlerts();
+      res.json({ ok: true, data: null });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: String(err) });
+    }
+  });
+
+  // ── Skills (walk-up discovery: group → workDir ancestors → container → global) ──
+  router.get('/api/skills', async (req: Request, res: Response) => {
+    const groupFolder = req.query.folder as string | undefined;
     const skills: Array<{
       name: string;
       description: string;
       type: string;
       folder: string;
+      tokenEstimate: number;
     }> = [];
+    const seenNames = new Set<string>();
 
-    // Container skills
-    const containerSkillsDir = path.resolve(
-      process.cwd(),
-      'container',
-      'skills',
-    );
-    if (fs.existsSync(containerSkillsDir)) {
-      for (const dir of fs.readdirSync(containerSkillsDir)) {
-        const skillFile = path.join(containerSkillsDir, dir, 'SKILL.md');
-        if (fs.existsSync(skillFile)) {
-          const parsed = parseSkillFrontmatter(
-            fs.readFileSync(skillFile, 'utf-8'),
-          );
-          skills.push({
-            name: parsed.name || dir,
-            description: parsed.description || '',
-            type: 'container',
-            folder: `container/skills/${dir}`,
-          });
-        }
+    const scanSkillDir = (dirPath: string, type: string, folderLabel: string) => {
+      if (!fs.existsSync(dirPath)) return;
+      for (const dir of fs.readdirSync(dirPath)) {
+        if (seenNames.has(dir)) continue;
+        const skillPath = path.join(dirPath, dir);
+        if (!fs.statSync(skillPath).isDirectory()) continue;
+        const skillFile = path.join(skillPath, 'SKILL.md');
+        if (!fs.existsSync(skillFile)) continue;
+        const content = fs.readFileSync(skillFile, 'utf-8');
+        const parsed = parseSkillFrontmatter(content);
+        const name = parsed.name || dir;
+        if (seenNames.has(name)) continue;
+        seenNames.add(dir);
+        seenNames.add(name);
+        // Skills are deferred — only frontmatter (name + description) loaded into context
+        const frontmatterText = `${name} ${parsed.description || ''}`;
+        skills.push({
+          name,
+          description: parsed.description || '',
+          type,
+          folder: `${folderLabel}/${dir}`,
+          tokenEstimate: Math.ceil(frontmatterText.length / 3.5),
+        });
       }
-    }
+    };
 
-    // Global user skills (~/.claude/skills/) — also synced by setupClaudeConfig
-    const globalSkillsDir = path.join(os.homedir(), '.claude', 'skills');
-    if (fs.existsSync(globalSkillsDir)) {
-      for (const dir of fs.readdirSync(globalSkillsDir)) {
-        const skillFile = path.join(globalSkillsDir, dir, 'SKILL.md');
-        if (fs.existsSync(skillFile)) {
-          const parsed = parseSkillFrontmatter(
-            fs.readFileSync(skillFile, 'utf-8'),
-          );
-          const name = parsed.name || dir;
-          // Skip if a container skill with the same name already exists
-          if (skills.some((s) => s.name === name)) continue;
-          skills.push({
-            name,
-            description: parsed.description || '',
-            type: 'global',
-            folder: `~/.claude/skills/${dir}`,
-          });
-        }
+    // Managed skills (toggleable via allowedSkills):
+    // 1. Container-wide skills — available to all groups
+    scanSkillDir(
+      path.resolve(process.cwd(), 'container', 'skills'),
+      'container', 'container/skills',
+    );
+    // 2. Global user skills (~/.claude/skills/)
+    scanSkillDir(
+      path.join(os.homedir(), '.claude', 'skills'),
+      'global', '~/.claude/skills',
+    );
+
+    // Native project skills (read-only) — from the group's workDir if it points
+    // to an external project. Skip .devenclaw-marked skills (those are managed
+    // skills synced into the project by setupClaudeConfig).
+    if (groupFolder) {
+      const allGroups = await getAllRegisteredGroups();
+      const group = Object.values(allGroups).find(g => g.folder === groupFolder);
+      if (group?.workDir) {
+        scanSkillDir(
+          path.resolve(group.workDir, '.claude', 'skills'),
+          'project', path.resolve(group.workDir, '.claude', 'skills').replace(os.homedir(), '~'),
+        );
       }
     }
 
     res.json({ ok: true, data: skills });
+  });
+
+  // ── Nanoclaw MCP Tools ──
+  router.get('/api/tools', (_req: Request, res: Response) => {
+    // Static metadata for all nanoclaw MCP tools — descriptions and token estimates
+    // Token estimates are approximate based on tool definition size (name + description + schema)
+    // Token estimates from Claude's actual context report (ground truth, Apr 2026)
+    const tools = [
+      { name: 'send_message', description: 'Send a message to the user/group with optional file attachment', tokenEstimate: 213 },
+      { name: 'schedule_task', description: 'Schedule recurring or one-time tasks with cron/interval/once', tokenEstimate: 868 },
+      { name: 'list_tasks', description: 'List all scheduled tasks for this group', tokenEstimate: 77 },
+      { name: 'pause_task', description: 'Pause a scheduled task', tokenEstimate: 90 },
+      { name: 'resume_task', description: 'Resume a paused task', tokenEstimate: 80 },
+      { name: 'cancel_task', description: 'Cancel and delete a scheduled task', tokenEstimate: 85 },
+      { name: 'update_task', description: 'Update an existing scheduled task', tokenEstimate: 185 },
+      { name: 'register_group', description: 'Register a new chat/group (main group only)', tokenEstimate: 409 },
+      { name: 'save_memory', description: 'Save a fact or preference to long-term memory', tokenEstimate: 247 },
+      { name: 'add_todo', description: 'Add a todo with priority, due date, reminder, recurrence', tokenEstimate: 323 },
+      { name: 'update_todo', description: 'Update an existing todo item', tokenEstimate: 276 },
+      { name: 'complete_todo', description: 'Mark a todo as done', tokenEstimate: 81 },
+      { name: 'delete_todo', description: 'Permanently delete a todo item', tokenEstimate: 84 },
+      { name: 'list_todos', description: "List the user's non-completed todos", tokenEstimate: 96 },
+      { name: 'run_command', description: 'Run a registered command/script', tokenEstimate: 260 },
+      { name: 'list_commands', description: 'List available commands for this group', tokenEstimate: 76 },
+    ];
+    res.json({ ok: true, data: tools });
   });
 
   // ── Push notification subscription ──

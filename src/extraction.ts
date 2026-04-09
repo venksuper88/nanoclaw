@@ -6,7 +6,10 @@ import { execFileSync } from 'child_process';
 import { GEMINI_API_KEY } from './config.js';
 import { logger } from './logger.js';
 import type { EmailClassification } from './types.js';
-import { loadEmailSchemas, buildClassificationPrompt } from './email-schemas.js';
+import {
+  loadEmailSchemas,
+  buildClassificationPrompt,
+} from './email-schemas.js';
 
 const MODEL = 'gemini-2.5-flash';
 

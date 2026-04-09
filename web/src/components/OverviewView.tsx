@@ -39,6 +39,7 @@ interface TokenUsage {
   total_cache_read: number;
   total_output: number;
   total_tokens: number;
+  total_cost_usd: number;
   turn_count: number;
   stateful_tokens: number;
   stateless_tokens: number;
@@ -75,6 +76,17 @@ function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
   return String(n);
+}
+
+// Cost from backend — hybrid: actual cost_usd per turn when available, Sonnet 4 estimate otherwise
+function calcCost(usage: TokenUsage | TokenUsage[]): number {
+  const items = Array.isArray(usage) ? usage : [usage];
+  return items.reduce((sum, u) => sum + (u.total_cost_usd || 0), 0);
+}
+
+function fmtCost(dollars: number): string {
+  if (dollars >= 1) return `$${dollars.toFixed(2)}`;
+  return `$${dollars.toFixed(3)}`;
 }
 
 type UsagePeriod = 'this_week' | 'last_week';
@@ -126,7 +138,7 @@ export function OverviewView({ groups, status, processingFolders, onSelectGroup,
   useEffect(() => {
     api.getAnalytics().then(r => { if (r.ok) setAnalytics(r.data); }).catch(() => {});
     api.getClaudeUsage().then(r => { if (r.ok && r.data) setClaudeUsage(r.data); }).catch(() => {});
-    api.getAlerts().then(r => { if (r.ok) setAlerts(r.data.filter(a => !a.dismissed)); }).catch(() => {});
+    api.getAlerts().then(r => { if (r.ok) setAlerts(r.data.filter(a => !a.dismissed).slice(0, 20)); }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -177,7 +189,13 @@ export function OverviewView({ groups, status, processingFolders, onSelectGroup,
         <div className="overview-section">
           <div className="overview-section-header">
             <h3>Alerts</h3>
-            <span style={{ fontSize: 11, color: 'var(--text2)' }}>{alerts.length} active</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 11, color: 'var(--text2)' }}>{alerts.length} active</span>
+              <button className="btn btn-sm btn-outline" onClick={async () => {
+                await api.dismissAllAlerts();
+                setAlerts([]);
+              }}>Clear All</button>
+            </div>
           </div>
           <div className="alert-list">
             {alerts.map(a => (
@@ -276,6 +294,7 @@ export function OverviewView({ groups, status, processingFolders, onSelectGroup,
         </div>
         <div className="usage-summary">
           <span className="usage-total">{fmtTokens(totalTokensAllGroups)} tokens</span>
+          <span className="usage-cost">{fmtCost(calcCost(tokenUsage))}</span>
           <span className="usage-turns">{totalTurns} turns</span>
         </div>
         {totalStatelessTokens > 0 && (
@@ -301,6 +320,7 @@ export function OverviewView({ groups, status, processingFolders, onSelectGroup,
                   </div>
                   <div className="usage-bar-value">
                     {fmtTokens(u.total_tokens)}
+                    <span className="usage-bar-cost">{fmtCost(calcCost(u))}</span>
                     {hasStateless && <span className="usage-bar-stateless-tag">{fmtTokens(u.stateless_tokens)} SL</span>}
                   </div>
                 </div>

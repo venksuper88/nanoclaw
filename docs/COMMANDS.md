@@ -40,7 +40,12 @@ commands/process-txn/
   "name": "process-txn",
   "description": "Process a bank transaction from email extraction",
   "runtime": "node",
-  "entry": "run.mjs"
+  "entry": "run.mjs",
+  "args": [
+    { "name": "amount", "description": "Transaction amount" },
+    { "name": "category", "description": "Category tag", "required": false }
+  ],
+  "timeout": 120
 }
 ```
 
@@ -50,6 +55,8 @@ commands/process-txn/
 | `description` | Yes | Short description shown in autocomplete and `list_commands` |
 | `runtime` | No | `node`, `bash`, or `python`. Auto-detected from entry file extension if omitted |
 | `entry` | No | Entry point filename. Default: `run.mjs` |
+| `args` | No | Array of named positional arguments. Each has `name`, optional `description`, optional `required` (default true). When defined, `!cmd arg1 arg2` maps to `{ name1: "arg1", name2: "arg2" }` instead of `{ args: "arg1 arg2" }` |
+| `timeout` | No | Timeout in seconds. Default: 60. Set higher for long-running commands (e.g. API calls, large DB operations) |
 
 ### 3. Entry point script
 
@@ -212,3 +219,43 @@ A group only sees:
 - **Commands run in parallel.** Each invocation spawns a separate process. Don't assume exclusive access to shared resources.
 - **The working directory is the command folder.** Use relative paths for bundled data files, absolute paths for group/project files.
 - **Test locally first.** You can run a command directly: `echo '{"test": true}' | node groups/your-group/commands/your-cmd/run.mjs`
+
+## Workflow commands
+
+A workflow command orchestrates other commands with transformation logic in between — no LLM needed.
+
+### Calling other commands
+
+Use the `_lib/run-command.mjs` utility:
+
+```javascript
+import { runCmd } from '../_lib/run-command.mjs';
+
+// Step 1: Translate via ask command
+const { message: translated } = await runCmd('ask', {
+  model: '2.5-flash',
+  prompt: `Translate to Spanish: ${input.text}`,
+});
+
+// Step 2: Transform
+const adInput = { headline: translated, template: 'train_promo' };
+
+// Step 3: Generate image via ad-pipeline command
+const result = await runCmd('ad-pipeline', adInput);
+
+process.stdout.write(JSON.stringify({
+  message: `Generated ad: ${result.message}`,
+}));
+```
+
+`runCmd(name, input, opts?)` resolves commands the same way as the orchestrator (local first, then global). Returns the parsed JSON output.
+
+A synchronous variant `runCmdSync(name, input)` is also available for simpler scripts.
+
+### Environment variables
+
+Workflow commands inherit all standard env vars plus:
+
+| Variable | Description |
+|----------|-------------|
+| `NANOCLAW_PROJECT_ROOT` | Project root — used by `_lib/run-command.mjs` for command resolution |

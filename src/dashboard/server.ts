@@ -85,7 +85,14 @@ export async function startDashboard(
   );
   // Creatives export API (loaded from ~/Projects/DevenCreativesPortal/)
   try {
-    const creativesApiPath = path.resolve(os.homedir(), 'Projects', 'DevenCreativesPortal', 'dist', 'api', 'index.js');
+    const creativesApiPath = path.resolve(
+      os.homedir(),
+      'Projects',
+      'DevenCreativesPortal',
+      'dist',
+      'api',
+      'index.js',
+    );
     if (fs.existsSync(creativesApiPath)) {
       const { createCreativesRouter } = await import(creativesApiPath);
       const creativesRouter = createCreativesRouter({
@@ -93,10 +100,17 @@ export async function startDashboard(
         puppeteer,
         dashboardPort: DASHBOARD_PORT,
       });
-      app.use('/api/creatives', express.json({ limit: '20mb' }), creativesRouter);
+      app.use(
+        '/api/creatives',
+        express.json({ limit: '20mb' }),
+        creativesRouter,
+      );
       logger.info('Creatives sub-app routes loaded from DevenCreativesPortal');
     } else {
-      logger.warn({ creativesApiPath }, 'Creatives sub-app not found, creatives API disabled');
+      logger.warn(
+        { creativesApiPath },
+        'Creatives sub-app not found, creatives API disabled',
+      );
     }
   } catch (err) {
     logger.error({ err }, 'Failed to load creatives sub-app routes');

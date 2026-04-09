@@ -1,6 +1,6 @@
 {
   "id": "testtemplatec",
-  "name": "TestTemplateC",
+  "name": "TemplateC_1:1",
   "canvas": {
     "width": 1200,
     "height": 1200
@@ -24,11 +24,12 @@
         "top": "23%"
       },
       "size": {
-        "width": 800,
-        "height": 200
+        "width": 900,
+        "height": 250
       },
       "defaultText": "Text here",
-      "style": "goldenHeadline"
+      "style": "goldenHeadline",
+      "minFontSize": 80
     },
     {
       "id": "zone_3",
@@ -43,7 +44,21 @@
       },
       "defaultText": "Text here",
       "style": "whiteButtonText",
-      "textFill": 100
+      "textFill": 85,
+      "minFontSize": 36,
+      "textFillV": 75
+    },
+    {
+      "id": "zone_4",
+      "type": "image",
+      "label": "Logo",
+      "position": {
+        "top": "5%"
+      },
+      "size": {
+        "width": 400,
+        "height": 200
+      }
     }
   ]
 }

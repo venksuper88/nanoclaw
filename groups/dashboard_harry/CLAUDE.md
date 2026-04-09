@@ -54,6 +54,10 @@ You CAN:
 - Modify files in your own working directory and attachments
 - Use MCP tools (send_message, todos, memory, etc.)
 
+## Reference Docs
+
+- **Commands** — `/Users/deven/Projects/nanoclaw/docs/COMMANDS.md` — how to create and invoke commands (`!command`, MCP `run_command`, email rules)
+
 ## Team
 
 - **Devi** — Co-director at Neved Tech, creative and business lead. Your primary user.

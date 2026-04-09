@@ -46,6 +46,7 @@ export interface TmuxOutput {
   newSessionId?: string;
   error?: string;
   sessionResumed?: boolean;
+  sessionInvalid?: boolean; // true when --resume failed (stale session ID)
   usage?: {
     input_tokens: number;
     cache_creation_input_tokens: number;
@@ -97,9 +98,52 @@ export function listSessions(): string[] {
   return output.split('\n').filter((s) => s.startsWith(TMUX_PREFIX + '-'));
 }
 
-function groupWorkDir(folder: string, workDir?: string): string {
+export function groupWorkDir(folder: string, workDir?: string): string {
   if (workDir) return path.resolve(workDir);
   return path.resolve(GROUPS_DIR, folder);
+}
+
+/**
+ * Walk up the directory tree from startDir collecting all .mcp.json files.
+ * Stops at filesystem root or home directory. Returns paths from most specific
+ * to least specific (child first), matching Claude Code's own discovery order.
+ */
+export function findMcpJsonFiles(startDir: string): string[] {
+  const results: string[] = [];
+  const home = os.homedir();
+  let dir = startDir;
+  const seen = new Set<string>();
+  while (dir && dir !== '/' && dir !== home) {
+    if (seen.has(dir)) break;
+    seen.add(dir);
+    const mcpPath = path.join(dir, '.mcp.json');
+    if (fs.existsSync(mcpPath)) results.push(mcpPath);
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return results;
+}
+
+/**
+ * Walk up from startDir collecting .claude/skills/ directories.
+ * Returns paths from most specific to least specific (child first).
+ */
+export function findSkillDirs(startDir: string): string[] {
+  const results: string[] = [];
+  const home = os.homedir();
+  let dir = startDir;
+  const seen = new Set<string>();
+  while (dir && dir !== '/' && dir !== home) {
+    if (seen.has(dir)) break;
+    seen.add(dir);
+    const skillsPath = path.join(dir, '.claude', 'skills');
+    if (fs.existsSync(skillsPath)) results.push(skillsPath);
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return results;
 }
 
 function groupClaudeDir(folder: string): string {
@@ -261,6 +305,7 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
           NANOCLAW_GROUP_FOLDER: group.folder,
           NANOCLAW_IS_MAIN: group.isMain ? '1' : '0',
           NANOCLAW_IPC_DIR: ipcDir,
+          NANOCLAW_DISABLED_TOOLS: (group.disabledTools || []).join(','),
         },
       },
     } as Record<string, any>,
@@ -287,13 +332,14 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
         } catch {}
       }
       Object.assign(allMcps, homeClaudeParsed.mcpServers || {});
-      // Collect MCP servers from .mcp.json in group's workDir
+      // Collect MCP servers from .mcp.json in group's workDir (walk up to project root)
       if (group.workDir) {
-        const mcpJsonPath = path.join(path.resolve(group.workDir), '.mcp.json');
-        if (fs.existsSync(mcpJsonPath)) {
+        for (const mcpJsonPath of findMcpJsonFiles(path.resolve(group.workDir))) {
           try {
             const mcpJson = JSON.parse(fs.readFileSync(mcpJsonPath, 'utf-8'));
-            for (const [name, config] of Object.entries(mcpJson.mcpServers || {})) {
+            for (const [name, config] of Object.entries(
+              mcpJson.mcpServers || {},
+            )) {
               if (!allMcps[name]) allMcps[name] = config;
             }
           } catch {}
@@ -311,7 +357,10 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
       fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
       // Write standalone MCP config for --mcp-config --strict-mcp-config
       const mcpConfigFile = path.join(claudeDir, 'mcp-config.json');
-      fs.writeFileSync(mcpConfigFile, JSON.stringify({ mcpServers: settings.mcpServers }, null, 2) + '\n');
+      fs.writeFileSync(
+        mcpConfigFile,
+        JSON.stringify({ mcpServers: settings.mcpServers }, null, 2) + '\n',
+      );
     } catch {
       // JSON parse failed — settings.json already written above
     }
@@ -330,53 +379,62 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
     fs.copyFileSync(homeClaudeJson, groupClaudeJson);
   }
 
-  // Sync skills
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
-  const skillsDst = path.join(claudeDir, 'skills');
-  if (fs.existsSync(skillsDst)) {
-    fs.rmSync(skillsDst, { recursive: true, force: true });
-  }
-  if (fs.existsSync(skillsSrc)) {
-    const allowedSkills = group.allowedSkills;
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      if (
-        allowedSkills &&
-        allowedSkills.length > 0 &&
-        !allowedSkills.includes(skillDir)
-      )
-        continue;
-      fs.cpSync(srcDir, path.join(skillsDst, skillDir), { recursive: true });
-    }
-  }
-  // Also sync global user skills from ~/.claude/skills/ (e.g. create-skill)
-  // Container skills take precedence — global skills won't overwrite them
-  const globalSkillsSrc = path.join(os.homedir(), '.claude', 'skills');
-  if (fs.existsSync(globalSkillsSrc)) {
-    for (const skillDir of fs.readdirSync(globalSkillsSrc)) {
-      const srcDir = path.join(globalSkillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      if (fs.existsSync(dstDir)) continue; // container skill takes precedence
-      fs.cpSync(srcDir, dstDir, { recursive: true });
-    }
-  }
-
-  // Copy settings + skills into the group's working directory .claude/
-  // so claude picks them up as project-level config (no CLAUDE_CONFIG_DIR needed)
-  const projectClaudeDir = path.join(
-    groupWorkDir(group.folder, group.workDir),
-    '.claude',
-  );
+  // Sync DevenClaw-managed skills into the project's .claude/skills/.
+  // Walk-up skills (project-local, e.g. Unity MCP skills) are already in place —
+  // Claude Code discovers them natively. We only ADD our managed skills.
+  // Sources (closest wins): group dir → container → global user.
+  const resolvedWorkDir = groupWorkDir(group.folder, group.workDir);
+  const projectClaudeDir = path.join(resolvedWorkDir, '.claude');
   fs.mkdirSync(projectClaudeDir, { recursive: true });
   fs.copyFileSync(settingsFile, path.join(projectClaudeDir, 'settings.json'));
-  if (fs.existsSync(skillsDst)) {
-    const projectSkills = path.join(projectClaudeDir, 'skills');
-    if (fs.existsSync(projectSkills)) {
-      fs.rmSync(projectSkills, { recursive: true, force: true });
+
+  const projectSkills = path.join(projectClaudeDir, 'skills');
+  fs.mkdirSync(projectSkills, { recursive: true });
+  const syncedSkillNames = new Set<string>();
+  const allowedSkills = group.allowedSkills;
+
+  const syncSkillsFrom = (srcDir: string) => {
+    if (!fs.existsSync(srcDir)) return;
+    // Skip if src and dst are the same dir (e.g. dashboard groups whose
+    // workDir IS the group folder) — would rm the source then fail to copy.
+    if (path.resolve(srcDir) === path.resolve(projectSkills)) {
+      // Still mark existing skills as "synced" so the cleanup loop doesn't delete them
+      for (const skillDir of fs.readdirSync(srcDir)) syncedSkillNames.add(skillDir);
+      return;
     }
-    fs.cpSync(skillsDst, projectSkills, { recursive: true });
+    for (const skillDir of fs.readdirSync(srcDir)) {
+      if (syncedSkillNames.has(skillDir)) continue; // closest wins
+      const src = path.join(srcDir, skillDir);
+      if (!fs.statSync(src).isDirectory()) continue;
+      if (allowedSkills && allowedSkills.length > 0 && !allowedSkills.includes(skillDir)) continue;
+      syncedSkillNames.add(skillDir);
+      const dst = path.join(projectSkills, skillDir);
+      if (fs.existsSync(dst)) {
+        fs.rmSync(dst, { recursive: true, force: true });
+      }
+      fs.cpSync(src, dst, { recursive: true });
+      // Marker to distinguish DevenClaw-synced from native project skills
+      fs.writeFileSync(path.join(dst, '.devenclaw'), '');
+    }
+  };
+
+  // 1. Group-specific skills (groups/{folder}/.claude/skills/)
+  syncSkillsFrom(path.join(GROUPS_DIR, group.folder, '.claude', 'skills'));
+  // 2. Container-wide skills (container/skills/)
+  syncSkillsFrom(path.join(process.cwd(), 'container', 'skills'));
+  // 3. Global user skills (~/.claude/skills/)
+  syncSkillsFrom(path.join(os.homedir(), '.claude', 'skills'));
+
+  // Remove stale DevenClaw-synced skills no longer in the source set
+  // (e.g. skill removed or disabled via allowedSkills).
+  // Only removes skills with .devenclaw marker — native project skills are preserved.
+  for (const existing of fs.readdirSync(projectSkills)) {
+    if (syncedSkillNames.has(existing)) continue;
+    const existingDir = path.join(projectSkills, existing);
+    if (!fs.statSync(existingDir).isDirectory()) continue;
+    if (fs.existsSync(path.join(existingDir, '.devenclaw'))) {
+      fs.rmSync(existingDir, { recursive: true, force: true });
+    }
   }
 
   // Create wrapper script for non-interactive `-p` mode
@@ -386,6 +444,12 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
   cleanOldTranscripts(group.folder, group.workDir);
 
   const mcpConfigFile = path.join(claudeDir, 'mcp-config.json');
+  // Copy shared rules file into session dir so the wrapper script can reference it
+  const rulesSource = path.join(process.cwd(), 'container', 'rules.md');
+  const rulesTarget = path.join(claudeDir, 'rules.md');
+  if (fs.existsSync(rulesSource)) {
+    fs.copyFileSync(rulesSource, rulesTarget);
+  }
   const wrapper = `#!/bin/bash
 # Run claude-lts in print mode and write done marker on completion
 export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
@@ -417,7 +481,12 @@ PROMPT=$(cat "$PROMPT_FILE")
 rm -f "$PROMPT_FILE"
 
 STREAM_LOG="\${DONE_FILE%.json}.stream"
-"$CLAUDE_BIN" -p "$PROMPT" $RESUME_FLAG --model "$MODEL" --mcp-config "$MCP_CONFIG" --strict-mcp-config --output-format stream-json --verbose --dangerously-skip-permissions 2>"$DONE_FILE.stderr" | tee "$STREAM_LOG"
+RULES_FILE="${rulesTarget}"
+RULES_FLAG=""
+if [ -f "$RULES_FILE" ]; then
+  RULES_FLAG="--append-system-prompt-file $RULES_FILE"
+fi
+"$CLAUDE_BIN" -p "$PROMPT" $RESUME_FLAG --model "$MODEL" --mcp-config "$MCP_CONFIG" --strict-mcp-config $RULES_FLAG --output-format stream-json --verbose --dangerously-skip-permissions 2>"$DONE_FILE.stderr" | tee "$STREAM_LOG"
 
 EXIT_CODE=\${PIPESTATUS[0]}
 echo "{\\"type\\":\\"done\\",\\"exit_code\\":$EXIT_CODE}" > "$DONE_FILE"
@@ -706,6 +775,7 @@ export async function runTmuxAgent(
         // Previously used tmux capture-pane (-S -200) which lost data for long conversations.
         let newSessionId: string | undefined;
         let resultText: string | null = null;
+        let sessionInvalid = false;
 
         if (fs.existsSync(streamLogFile)) {
           try {
@@ -724,6 +794,20 @@ export async function runTmuxAgent(
                 );
                 newSessionId = resultEvent.session_id;
                 resultText = resultEvent.result || null;
+                // Detect stale session ID — claude-lts returns is_error with
+                // "No conversation found" when --resume session doesn't exist
+                if (resultEvent.is_error && Array.isArray(resultEvent.errors)) {
+                  const hasNoConversation = resultEvent.errors.some(
+                    (e: string) => e.includes('No conversation found'),
+                  );
+                  if (hasNoConversation) {
+                    sessionInvalid = true;
+                    logger.warn(
+                      { folder: input.groupFolder, sessionId: input.sessionId },
+                      'Session ID invalid — conversation not found, will clear',
+                    );
+                  }
+                }
                 if (resultEvent.duration_ms != null) {
                   resultPerformance = {
                     durationMs: resultEvent.duration_ms,
@@ -812,6 +896,7 @@ export async function runTmuxAgent(
           result: resultText,
           newSessionId: isRealSuccess ? newSessionId : undefined,
           sessionResumed: willResume,
+          sessionInvalid,
           error:
             data.exit_code !== 0
               ? `claude exited with code ${data.exit_code}`

@@ -164,11 +164,39 @@ export async function fetchAndStoreTenjinSnapshot(
     YANDEX: 'Yandex',
     MYTARGET: 'MyTarget',
   };
+  // Canonical key map: AppLovin MAX display name → revenue_monthly source_key
+  // Covers both legacy display names and new API identifiers (with bidding suffixes)
+  const NETWORK_TO_KEY: Record<string, string> = {
+    // Legacy display names
+    'AppLovin': 'applovin', 'Google AdMob': 'google_adrev', 'Meta': 'meta',
+    'Unity': 'unity', 'Mintegral': 'mintegral', 'IronSource': 'ironsource',
+    'Yandex': 'yandex', 'Liftoff': 'ironsource',
+    // New API identifiers
+    'APPLOVIN_NETWORK': 'applovin', 'APPLOVIN_EXCHANGE': 'applovin',
+    'GOOGLE': 'google_adrev', 'ADMOB_BIDDING': 'google_adrev',
+    'FACEBOOK': 'meta', 'FACEBOOK_NETWORK': 'meta',
+    'UNITY_ADS': 'unity', 'UNITY_BIDDING': 'unity',
+    'MINTEGRAL': 'mintegral', 'MINTEGRAL_BIDDING': 'mintegral',
+    'IRONSOURCE': 'ironsource', 'IRONSOURCE_BIDDING': 'ironsource',
+    'YANDEX': 'yandex', 'YANDEX_BIDDING': 'yandex',
+    'VUNGLE': 'ironsource',
+  };
+  const LAG_DAYS: Record<string, number> = {
+    google_play: 30, apple: 45, applovin: 30, google_adrev: 30,
+    meta: 30, unity: 50, mintegral: 45, ironsource: 60, yandex: 45,
+  };
   for (const row of maxData.results || []) {
     const net = row.network || 'Other';
     const displayName = NETWORK_NAMES[net] || net;
     const rev = Number(row.estimated_revenue) || 0;
     networkMap[displayName] = (networkMap[displayName] || 0) + rev;
+  }
+
+  // Build canonical aggregated map for revenue_monthly upsert
+  const canonicalMap: Record<string, number> = {};
+  for (const [displayName, rev] of Object.entries(networkMap)) {
+    const key = NETWORK_TO_KEY[displayName];
+    if (key) canonicalMap[key] = (canonicalMap[key] || 0) + rev;
   }
 
   await getDbClient().execute({
@@ -190,6 +218,39 @@ export async function fetchAndStoreTenjinSnapshot(
       fetched_at,
     ],
   });
+
+  // Upsert expected_usd into revenue_monthly (single source of truth for reconciliation)
+  await getDbClient().execute(`
+    CREATE TABLE IF NOT EXISTS revenue_monthly (
+      source_key TEXT NOT NULL, month TEXT NOT NULL,
+      expected_usd REAL NOT NULL DEFAULT 0, received_usd REAL NOT NULL DEFAULT 0,
+      lag_days INTEGER NOT NULL DEFAULT 30, received_date TEXT,
+      PRIMARY KEY (source_key, month)
+    )
+  `);
+  const androidIAP = Math.max(0, androidTotalRev - androidAdRev);
+  const iosIAP     = Math.max(0, iosTotalRev - iosAdRev);
+  const iapUpserts: Array<[string, number]> = [
+    ['google_play', androidIAP],
+    ['apple',       iosIAP],
+  ];
+  for (const [key, exp] of iapUpserts) {
+    await getDbClient().execute({
+      sql: `INSERT INTO revenue_monthly (source_key, month, expected_usd, lag_days)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(source_key, month) DO UPDATE SET expected_usd=excluded.expected_usd`,
+      args: [key, month, exp, LAG_DAYS[key] ?? 30],
+    });
+  }
+  for (const [key, exp] of Object.entries(canonicalMap)) {
+    if (exp <= 0) continue;
+    await getDbClient().execute({
+      sql: `INSERT INTO revenue_monthly (source_key, month, expected_usd, lag_days)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(source_key, month) DO UPDATE SET expected_usd=excluded.expected_usd`,
+      args: [key, month, Math.round(exp * 100) / 100, LAG_DAYS[key] ?? 45],
+    });
+  }
 
   return {
     month,

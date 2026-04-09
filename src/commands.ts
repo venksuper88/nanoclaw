@@ -17,11 +17,19 @@ import { logger } from './logger.js';
 const PROJECT_ROOT = process.cwd();
 const GLOBAL_COMMANDS_DIR = path.resolve(PROJECT_ROOT, 'container', 'commands');
 
+export interface CommandArg {
+  name: string;
+  description?: string;
+  required?: boolean; // default: true
+}
+
 export interface CommandDefinition {
   name: string;
   description: string;
   runtime?: 'node' | 'bash' | 'python'; // default: inferred from entry
   entry?: string; // default: run.mjs
+  args?: CommandArg[];
+  timeout?: number; // seconds, default: 60
 }
 
 export interface CommandResult {
@@ -89,10 +97,40 @@ function loadCommandDef(dir: string): CommandDefinition | null {
       description: raw.description || '',
       runtime: raw.runtime,
       entry: raw.entry,
+      args: Array.isArray(raw.args) ? raw.args : undefined,
+      timeout: typeof raw.timeout === 'number' ? raw.timeout : undefined,
     };
   } catch {
     return null;
   }
+}
+
+/** Map positional CLI args to named inputs using the command's arg definitions.
+ *  The last defined arg is greedy — it consumes all remaining tokens up to
+ *  any trailing tokens that look like filenames (contain a dot after position).
+ *  Extra positional args beyond defined ones go into `_rest` as an array. */
+export function mapArgsToInput(
+  argDefs: CommandArg[] | undefined,
+  positionalArgs: string[],
+  sender?: string,
+): Record<string, unknown> {
+  if (!argDefs || argDefs.length === 0) {
+    return { args: positionalArgs.join(' '), sender };
+  }
+  const input: Record<string, unknown> = {};
+  // Always include raw args string for commands that want to parse themselves
+  input._raw = positionalArgs.join(' ');
+
+  for (let i = 0; i < argDefs.length; i++) {
+    if (i === argDefs.length - 1) {
+      // Last defined arg is greedy — gets all remaining positional args
+      input[argDefs[i].name] = positionalArgs.slice(i).join(' ') || null;
+    } else {
+      input[argDefs[i].name] = positionalArgs[i] ?? null;
+    }
+  }
+  if (sender) input.sender = sender;
+  return input;
 }
 
 function inferRuntime(entry: string): { bin: string; args: string[] } {
@@ -122,7 +160,14 @@ export interface RunCommandOpts {
 
 /** Execute a command in an isolated child process. */
 export async function runCommand(opts: RunCommandOpts): Promise<CommandResult> {
-  const { commandName, groupFolder, chatJid, input, sendMessage, timeoutMs = 60_000 } = opts;
+  const {
+    commandName,
+    groupFolder,
+    chatJid,
+    input,
+    sendMessage,
+    timeoutMs: overrideTimeoutMs,
+  } = opts;
 
   const resolved = resolveCommand(commandName, groupFolder);
   if (!resolved) {
@@ -134,6 +179,8 @@ export async function runCommand(opts: RunCommandOpts): Promise<CommandResult> {
   const { dir, def } = resolved;
   const entry = def.entry || 'run.mjs';
   const entryPath = path.join(dir, entry);
+  // Priority: caller override > COMMAND.json timeout (seconds→ms) > 60s default
+  const timeoutMs = overrideTimeoutMs ?? (def.timeout ? def.timeout * 1000 : 60_000);
 
   if (!fs.existsSync(entryPath)) {
     const msg = `Command entry not found: ${entryPath}`;
@@ -145,11 +192,14 @@ export async function runCommand(opts: RunCommandOpts): Promise<CommandResult> {
   let bin: string;
   let args: string[];
   if (def.runtime === 'node') {
-    bin = 'node'; args = [entryPath];
+    bin = 'node';
+    args = [entryPath];
   } else if (def.runtime === 'bash') {
-    bin = 'bash'; args = [entryPath];
+    bin = 'bash';
+    args = [entryPath];
   } else if (def.runtime === 'python') {
-    bin = 'python3'; args = [entryPath];
+    bin = 'python3';
+    args = [entryPath];
   } else {
     const inferred = inferRuntime(entry);
     bin = inferred.bin;
@@ -159,7 +209,10 @@ export async function runCommand(opts: RunCommandOpts): Promise<CommandResult> {
   // Send start message
   await sendMessage(`Running command: ${commandName}`).catch(() => {});
 
-  logger.info({ commandName, groupFolder, entry: entryPath }, 'Executing command');
+  logger.info(
+    { commandName, groupFolder, entry: entryPath },
+    'Executing command',
+  );
 
   return new Promise<CommandResult>((resolve) => {
     const child = spawn(bin, args, {
@@ -169,6 +222,7 @@ export async function runCommand(opts: RunCommandOpts): Promise<CommandResult> {
         NANOCLAW_GROUP_FOLDER: groupFolder,
         NANOCLAW_CHAT_JID: chatJid,
         NANOCLAW_COMMAND_NAME: commandName,
+        NANOCLAW_PROJECT_ROOT: PROJECT_ROOT,
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -176,8 +230,12 @@ export async function runCommand(opts: RunCommandOpts): Promise<CommandResult> {
     let stdout = '';
     let stderr = '';
 
-    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
 
     // Write input as JSON to stdin
     child.stdin.write(JSON.stringify(input));
@@ -198,8 +256,13 @@ export async function runCommand(opts: RunCommandOpts): Promise<CommandResult> {
 
       if (exitCode !== 0) {
         const errMsg = stderr.trim() || `Exit code ${exitCode}`;
-        logger.error({ commandName, groupFolder, exitCode, stderr: errMsg }, 'Command failed');
-        await sendMessage(`Command failed: ${commandName} — ${errMsg.slice(0, 200)}`).catch(() => {});
+        logger.error(
+          { commandName, groupFolder, exitCode, stderr: errMsg },
+          'Command failed',
+        );
+        await sendMessage(
+          `Command failed: ${commandName} — ${errMsg.slice(0, 200)}`,
+        ).catch(() => {});
         resolve({ status: 'error', message: errMsg, exitCode });
         return;
       }
@@ -218,7 +281,9 @@ export async function runCommand(opts: RunCommandOpts): Promise<CommandResult> {
       }
 
       logger.info({ commandName, groupFolder, exitCode }, 'Command completed');
-      await sendMessage(message || `Command completed: ${commandName}`).catch(() => {});
+      await sendMessage(message || `Command completed: ${commandName}`).catch(
+        () => {},
+      );
       resolve({ status: 'success', message, data, exitCode: 0 });
     });
 
@@ -226,7 +291,9 @@ export async function runCommand(opts: RunCommandOpts): Promise<CommandResult> {
       clearTimeout(timer);
       const msg = `Command spawn error: ${err.message}`;
       logger.error({ commandName, groupFolder, err }, msg);
-      await sendMessage(`Command failed: ${commandName} — ${err.message}`).catch(() => {});
+      await sendMessage(
+        `Command failed: ${commandName} — ${err.message}`,
+      ).catch(() => {});
       resolve({ status: 'error', message: msg, exitCode: 1 });
     });
   });

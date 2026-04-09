@@ -1,0 +1,7 @@
+{
+  "name": "force-kill",
+  "description": "Force-kill a stuck claude-lts process without clearing the session. Next message resumes the same conversation.",
+  "runtime": "bash",
+  "entry": "run.sh",
+  "timeout": 10
+}

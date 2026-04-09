@@ -29,7 +29,8 @@ interface Props {
   reconnectKey: number;
 }
 
-interface Command { command: string; description: string; prefix?: string; }
+interface CommandArg { name: string; description?: string; required?: boolean; }
+interface Command { command: string; description: string; prefix?: string; args?: CommandArg[]; }
 
 const COLORS = ['#C4B5E3','#A5D6A7','#FFD54F','#90CAF9','#CE93D8','#F48FB1','#80CBC4','#FFAB91'];
 function avatarColor(s: string): string {
@@ -571,7 +572,7 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
         <div className="cmd-menu" ref={cmdMenuRef}>
           {filteredCommands.map((cmd, i) => (
             <div key={cmd.command} className={`cmd-item ${i === selectedCmd ? 'selected' : ''}`} onClick={() => selectCommand(cmd)}>
-              <span className="cmd-name">{cmd.prefix || '/'}{cmd.command}</span>
+              <span className="cmd-name">{cmd.prefix || '/'}{cmd.command}{cmd.args?.length ? ' ' + cmd.args.map(a => `<${a.name}>`).join(' ') : ''}</span>
               <span className="cmd-desc">{cmd.description}</span>
             </div>
           ))}
@@ -610,7 +611,7 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
       )}
 
       {/* Floating input */}
-      <div className="chat-input-bar">
+      <div className={`chat-input-bar${input.startsWith('!') ? ' command-mode' : ''}`}>
         <label className="attach-btn">
           <span className="mi">attach_file</span>
           <input type="file" style={{ display: 'none' }} onChange={upload} multiple />
