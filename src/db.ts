@@ -12,6 +12,9 @@ import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
   NewMessage,
+  Note,
+  NoteAudit,
+  NoteFolder,
   RegisteredGroup,
   ScheduledTask,
   TaskRunLog,
@@ -423,6 +426,103 @@ async function createSchema(database: Client): Promise<void> {
   await database.execute(
     `CREATE INDEX IF NOT EXISTS idx_agent_alerts_created ON agent_alerts(created_at)`,
   );
+
+  // Note folders — nested folders for organizing notes
+  await database.execute(`
+    CREATE TABLE IF NOT EXISTS notes_folders (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      parent_id TEXT,
+      icon TEXT,
+      color TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    )
+  `);
+  await database.execute(
+    `CREATE INDEX IF NOT EXISTS idx_notes_folders_user ON notes_folders(user_id)`,
+  );
+
+  // Notes — user-scoped notes with folder support
+  await database.execute(`
+    CREATE TABLE IF NOT EXISTS notes (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      folder_id TEXT,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL DEFAULT '',
+      tags TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  await database.execute(
+    `CREATE INDEX IF NOT EXISTS idx_notes_user ON notes(user_id, updated_at)`,
+  );
+  await database.execute(
+    `CREATE INDEX IF NOT EXISTS idx_notes_folder ON notes(folder_id)`,
+  );
+
+  // Add folder_id column if it doesn't exist (migration)
+  try {
+    await database.execute(
+      `ALTER TABLE notes ADD COLUMN folder_id TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  // Add deleted_at column for soft-delete (migration)
+  try {
+    await database.execute(
+      `ALTER TABLE notes ADD COLUMN deleted_at TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  // Notes audit log
+  await database.execute(`
+    CREATE TABLE IF NOT EXISTS notes_audit (
+      id TEXT PRIMARY KEY,
+      note_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      details TEXT,
+      created_at TEXT NOT NULL
+    )
+  `);
+  await database.execute(
+    `CREATE INDEX IF NOT EXISTS idx_notes_audit_note ON notes_audit(note_id, created_at)`,
+  );
+
+  // FTS5 full-text search index for notes
+  await database.execute(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+      title, content, tags,
+      content='notes', content_rowid='rowid'
+    )
+  `);
+
+  // Triggers to keep FTS index in sync with notes table
+  await database.execute(`
+    CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes BEGIN
+      INSERT INTO notes_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags);
+    END
+  `);
+  await database.execute(`
+    CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes BEGIN
+      INSERT INTO notes_fts(notes_fts, rowid, title, content, tags) VALUES('delete', old.rowid, old.title, old.content, old.tags);
+    END
+  `);
+  await database.execute(`
+    CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
+      INSERT INTO notes_fts(notes_fts, rowid, title, content, tags) VALUES('delete', old.rowid, old.title, old.content, old.tags);
+      INSERT INTO notes_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags);
+    END
+  `);
 
   // Per-group MCP server allowlist and tool disabling
   for (const col of ['allowed_mcp_servers', 'disabled_tools']) {
@@ -979,6 +1079,303 @@ export async function getDueTodoReminders(): Promise<Todo[]> {
   return result.rows as unknown as Todo[];
 }
 
+// --- Note Folders CRUD ---
+
+export async function createNoteFolder(
+  folder: NoteFolder,
+): Promise<void> {
+  await db.execute({
+    sql: `INSERT INTO notes_folders (id, user_id, name, parent_id, icon, color, sort_order, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [
+      folder.id,
+      folder.user_id,
+      folder.name,
+      folder.parent_id ?? null,
+      folder.icon ?? null,
+      folder.color ?? null,
+      folder.sort_order,
+      folder.created_at,
+    ],
+  });
+}
+
+export async function getNoteFoldersByUser(
+  userId: string,
+): Promise<NoteFolder[]> {
+  const result = await db.execute({
+    sql: 'SELECT * FROM notes_folders WHERE user_id = ? ORDER BY sort_order, name',
+    args: [userId],
+  });
+  return result.rows as unknown as NoteFolder[];
+}
+
+export async function getNoteFolderById(
+  id: string,
+): Promise<NoteFolder | undefined> {
+  const result = await db.execute({
+    sql: 'SELECT * FROM notes_folders WHERE id = ?',
+    args: [id],
+  });
+  return (result.rows[0] ?? undefined) as unknown as NoteFolder | undefined;
+}
+
+export async function updateNoteFolder(
+  id: string,
+  updates: Partial<Pick<NoteFolder, 'name' | 'parent_id' | 'icon' | 'color' | 'sort_order'>>,
+): Promise<void> {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, val] of Object.entries(updates)) {
+    if (val !== undefined) {
+      fields.push(`${key} = ?`);
+      values.push(val);
+    }
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  await db.execute({
+    sql: `UPDATE notes_folders SET ${fields.join(', ')} WHERE id = ?`,
+    args: values as InValue[],
+  });
+}
+
+export async function deleteNoteFolder(id: string): Promise<void> {
+  // Move notes in this folder to root (unfiled)
+  await db.execute({
+    sql: 'UPDATE notes SET folder_id = NULL WHERE folder_id = ?',
+    args: [id],
+  });
+  // Re-parent child folders to this folder's parent
+  const folder = await getNoteFolderById(id);
+  await db.execute({
+    sql: 'UPDATE notes_folders SET parent_id = ? WHERE parent_id = ?',
+    args: [folder?.parent_id ?? null, id],
+  });
+  await db.execute({
+    sql: 'DELETE FROM notes_folders WHERE id = ?',
+    args: [id],
+  });
+}
+
+/** Ensure a user has at least a "General" default folder. Returns its ID. */
+export async function ensureDefaultFolder(userId: string): Promise<string> {
+  const existing = await db.execute({
+    sql: "SELECT id FROM notes_folders WHERE user_id = ? AND name = 'General' AND parent_id IS NULL",
+    args: [userId],
+  });
+  if (existing.rows.length > 0) {
+    return (existing.rows[0] as unknown as { id: string }).id;
+  }
+  const id = `nf-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  await createNoteFolder({
+    id,
+    user_id: userId,
+    name: 'General',
+    parent_id: null,
+    icon: 'folder',
+    color: null,
+    sort_order: 0,
+    created_at: new Date().toISOString(),
+  });
+  return id;
+}
+
+// --- Notes audit ---
+
+export async function logNoteAudit(
+  noteId: string,
+  action: NoteAudit['action'],
+  actor: string,
+  details?: Record<string, unknown>,
+): Promise<void> {
+  const id = `na-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  await db.execute({
+    sql: `INSERT INTO notes_audit (id, note_id, action, actor, details, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)`,
+    args: [id, noteId, action, actor, details ? JSON.stringify(details) : null, new Date().toISOString()],
+  });
+}
+
+export async function getNoteAuditLog(noteId: string): Promise<NoteAudit[]> {
+  const result = await db.execute({
+    sql: 'SELECT * FROM notes_audit WHERE note_id = ? ORDER BY created_at DESC',
+    args: [noteId],
+  });
+  return result.rows as unknown as NoteAudit[];
+}
+
+// --- Notes CRUD ---
+
+export async function createNote(note: Note, actor?: string): Promise<void> {
+  await db.execute({
+    sql: `INSERT INTO notes (id, user_id, folder_id, title, content, tags, created_by, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+    args: [
+      note.id,
+      note.user_id,
+      note.folder_id ?? null,
+      note.title,
+      note.content,
+      note.tags ?? null,
+      note.created_by,
+      note.created_at,
+      note.updated_at,
+    ],
+  });
+  await logNoteAudit(note.id, 'create', actor || note.created_by, { title: note.title });
+}
+
+export async function getNoteById(id: string): Promise<Note | undefined> {
+  const result = await db.execute({
+    sql: 'SELECT * FROM notes WHERE id = ?',
+    args: [id],
+  });
+  return (result.rows[0] ?? undefined) as unknown as Note | undefined;
+}
+
+export async function getNotesByUser(userId: string): Promise<Note[]> {
+  const result = await db.execute({
+    sql: 'SELECT * FROM notes WHERE user_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC',
+    args: [userId],
+  });
+  return result.rows as unknown as Note[];
+}
+
+export async function getNotesByFolder(
+  folderId: string | null,
+  userId: string,
+): Promise<Note[]> {
+  if (folderId === null) {
+    const result = await db.execute({
+      sql: 'SELECT * FROM notes WHERE user_id = ? AND folder_id IS NULL AND deleted_at IS NULL ORDER BY updated_at DESC',
+      args: [userId],
+    });
+    return result.rows as unknown as Note[];
+  }
+  const result = await db.execute({
+    sql: 'SELECT * FROM notes WHERE folder_id = ? AND user_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC',
+    args: [folderId, userId],
+  });
+  return result.rows as unknown as Note[];
+}
+
+export async function getAllNotes(): Promise<Note[]> {
+  const result = await db.execute(
+    'SELECT * FROM notes WHERE deleted_at IS NULL ORDER BY updated_at DESC',
+  );
+  return result.rows as unknown as Note[];
+}
+
+export async function getDeletedNotes(userId: string): Promise<Note[]> {
+  const result = await db.execute({
+    sql: 'SELECT * FROM notes WHERE user_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC',
+    args: [userId],
+  });
+  return result.rows as unknown as Note[];
+}
+
+export async function searchNotes(
+  userId: string,
+  query: string,
+): Promise<Note[]> {
+  // Use FTS5 for word-based search with ranking
+  const result = await db.execute({
+    sql: `SELECT n.* FROM notes n
+      JOIN notes_fts fts ON n.rowid = fts.rowid
+      WHERE n.user_id = ? AND n.deleted_at IS NULL AND notes_fts MATCH ?
+      ORDER BY rank`,
+    args: [userId, query],
+  });
+  return result.rows as unknown as Note[];
+}
+
+export async function updateNote(
+  id: string,
+  updates: Partial<Pick<Note, 'title' | 'content' | 'tags' | 'folder_id'>>,
+  actor?: string,
+): Promise<void> {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  const changed: Record<string, unknown> = {};
+  if (updates.title !== undefined) {
+    fields.push('title = ?');
+    values.push(updates.title);
+    changed.title = updates.title;
+  }
+  if (updates.content !== undefined) {
+    fields.push('content = ?');
+    values.push(updates.content);
+    changed.content = '(updated)';
+  }
+  if (updates.tags !== undefined) {
+    fields.push('tags = ?');
+    values.push(updates.tags);
+    changed.tags = updates.tags;
+  }
+  if (updates.folder_id !== undefined) {
+    fields.push('folder_id = ?');
+    values.push(updates.folder_id);
+    changed.folder_id = updates.folder_id;
+  }
+  if (fields.length === 0) return;
+  fields.push('updated_at = ?');
+  values.push(new Date().toISOString());
+  values.push(id);
+  await db.execute({
+    sql: `UPDATE notes SET ${fields.join(', ')} WHERE id = ?`,
+    args: values as InValue[],
+  });
+  await logNoteAudit(id, 'update', actor || 'unknown', changed);
+}
+
+/** Soft-delete a note (moves to trash) */
+export async function deleteNote(id: string, actor?: string): Promise<void> {
+  await db.execute({
+    sql: 'UPDATE notes SET deleted_at = ? WHERE id = ?',
+    args: [new Date().toISOString(), id],
+  });
+  await logNoteAudit(id, 'delete', actor || 'unknown');
+}
+
+/** Restore a soft-deleted note */
+export async function restoreNote(id: string, actor?: string): Promise<void> {
+  await db.execute({
+    sql: 'UPDATE notes SET deleted_at = NULL WHERE id = ?',
+    args: [id],
+  });
+  await logNoteAudit(id, 'restore', actor || 'unknown');
+}
+
+/** Permanently delete a note */
+export async function purgeNote(id: string): Promise<void> {
+  await db.execute({ sql: 'DELETE FROM notes WHERE id = ?', args: [id] });
+}
+
+/** Ensure a folder exists for an agent group. Returns its ID. */
+export async function ensureGroupFolder(userId: string, groupFolder: string, groupName?: string): Promise<string> {
+  const displayName = groupName || groupFolder.replace(/^dashboard_/, '');
+  const existing = await db.execute({
+    sql: 'SELECT id FROM notes_folders WHERE user_id = ? AND name = ? AND parent_id IS NULL',
+    args: [userId, displayName],
+  });
+  if (existing.rows.length > 0) {
+    return (existing.rows[0] as unknown as { id: string }).id;
+  }
+  const id = `nf-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  await createNoteFolder({
+    id,
+    user_id: userId,
+    name: displayName,
+    parent_id: null,
+    icon: 'smart_toy',
+    color: null,
+    sort_order: 10,
+    created_at: new Date().toISOString(),
+  });
+  return id;
+}
+
 // --- Router state accessors ---
 
 export async function getRouterState(key: string): Promise<string | undefined> {
@@ -1165,7 +1562,9 @@ export async function getAllRegisteredGroups(): Promise<
       mode: row.mode || 'tmux',
       workDir: row.work_dir || undefined,
       model: (row.model as 'opus' | 'sonnet') || 'opus',
-      allowedMcpServers: row.allowed_mcp_servers ? JSON.parse(row.allowed_mcp_servers) : [],
+      allowedMcpServers: row.allowed_mcp_servers
+        ? JSON.parse(row.allowed_mcp_servers)
+        : [],
       disabledTools: row.disabled_tools ? JSON.parse(row.disabled_tools) : [],
     };
   }

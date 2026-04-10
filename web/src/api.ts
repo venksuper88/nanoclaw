@@ -167,6 +167,52 @@ export const api = {
   deleteTodo: (id: string) =>
     request<ApiResponse<null>>(`/api/todos/${id}`, { method: 'DELETE' }),
 
+  // Note Folders
+  getNoteFolders: () =>
+    request<ApiResponse<Array<{ id: string; user_id: string; name: string; parent_id: string | null; icon: string | null; color: string | null; sort_order: number; created_at: string }>>>('/api/notes/folders'),
+
+  createNoteFolder: (folder: { name: string; parent_id?: string; icon?: string; color?: string; sort_order?: number }) =>
+    request<ApiResponse<Array<any>>>('/api/notes/folders', { method: 'POST', body: JSON.stringify(folder) }),
+
+  updateNoteFolder: (id: string, updates: Record<string, any>) =>
+    request<ApiResponse<Array<any>>>(`/api/notes/folders/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
+
+  deleteNoteFolder: (id: string) =>
+    request<ApiResponse<Array<any>>>(`/api/notes/folders/${id}`, { method: 'DELETE' }),
+
+  // Notes
+  getNotes: (opts?: { q?: string; folder?: string }) => {
+    const params = new URLSearchParams();
+    if (opts?.q) params.set('q', opts.q);
+    if (opts?.folder) params.set('folder', opts.folder);
+    const qs = params.toString();
+    return request<ApiResponse<Array<{ id: string; user_id: string; folder_id: string | null; title: string; content: string; tags: string | null; created_by: string; created_at: string; updated_at: string; deleted_at: string | null }>>>(`/api/notes${qs ? `?${qs}` : ''}`);
+  },
+
+  getNote: (id: string) =>
+    request<ApiResponse<{ id: string; user_id: string; folder_id: string | null; title: string; content: string; tags: string | null; created_by: string; created_at: string; updated_at: string }>>(`/api/notes/${id}`),
+
+  createNote: (note: { title: string; content?: string; tags?: string; folder_id?: string }) =>
+    request<ApiResponse<any>>('/api/notes', { method: 'POST', body: JSON.stringify(note) }),
+
+  updateNote: (id: string, updates: Record<string, any>) =>
+    request<ApiResponse<any>>(`/api/notes/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
+
+  deleteNote: (id: string) =>
+    request<ApiResponse<null>>(`/api/notes/${id}`, { method: 'DELETE' }),
+
+  getTrashNotes: () =>
+    request<ApiResponse<Array<{ id: string; user_id: string; folder_id: string | null; title: string; content: string; tags: string | null; created_by: string; created_at: string; updated_at: string; deleted_at: string }>>>('/api/notes/trash'),
+
+  restoreNote: (id: string) =>
+    request<ApiResponse<any>>(`/api/notes/${id}/restore`, { method: 'POST', body: '{}' }),
+
+  purgeNote: (id: string) =>
+    request<ApiResponse<null>>(`/api/notes/${id}/purge`, { method: 'DELETE' }),
+
+  getNoteAudit: (id: string) =>
+    request<ApiResponse<Array<{ id: string; note_id: string; action: string; actor: string; details: string | null; created_at: string }>>>(`/api/notes/${id}/audit`),
+
   getLogs: (folder: string) =>
     request<ApiResponse<Array<{ name: string; content: string }>>>(`/api/logs/${folder}`),
 
@@ -227,8 +273,8 @@ export const api = {
   getTools: () =>
     request<ApiResponse<Array<{ name: string; description: string; tokenEstimate: number }>>>('/api/tools'),
 
-  getMcpServers: () =>
-    request<ApiResponse<Array<{ name: string; type: string }>>>('/api/mcp-servers'),
+  getMcpServers: (folder?: string) =>
+    request<ApiResponse<Array<{ name: string; type: string }>>>(`/api/mcp-servers${folder ? `?folder=${encodeURIComponent(folder)}` : ''}`),
 
   // Email types & rules
   getEmailTypes: () =>

@@ -180,7 +180,8 @@ export async function runCommand(opts: RunCommandOpts): Promise<CommandResult> {
   const entry = def.entry || 'run.mjs';
   const entryPath = path.join(dir, entry);
   // Priority: caller override > COMMAND.json timeout (seconds→ms) > 60s default
-  const timeoutMs = overrideTimeoutMs ?? (def.timeout ? def.timeout * 1000 : 60_000);
+  const timeoutMs =
+    overrideTimeoutMs ?? (def.timeout ? def.timeout * 1000 : 60_000);
 
   if (!fs.existsSync(entryPath)) {
     const msg = `Command entry not found: ${entryPath}`;

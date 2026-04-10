@@ -110,13 +110,16 @@ export function SettingsView({ groups }: { groups: Group[] }) {
     }).catch(() => {});
   }, []);
 
-  // Reload skills when expanded group changes (project skills differ per group)
+  // Reload skills and MCP servers when expanded group changes (project-scoped)
   useEffect(() => {
     if (!expandedGroup) return;
     const group = groups.find(g => g.jid === expandedGroup);
     if (!group) return;
     api.getSkills(group.folder).then(r => {
       if (r.ok) setAvailableSkills(r.data);
+    }).catch(() => {});
+    api.getMcpServers(group.folder).then(r => {
+      if (r.ok) setAvailableMcpServers(r.data);
     }).catch(() => {});
   }, [expandedGroup, groups]);
 

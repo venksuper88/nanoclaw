@@ -47,3 +47,20 @@ If you're stuck or uncertain:
 - Do NOT silently continue investigating for 10+ minutes.
 - The user would rather answer a quick question than wait 20 minutes
   for you to figure it out alone.
+
+## Notes
+
+Use the `/notes` skill to save, search, and organize persistent notes.
+Notes survive across sessions and are visible in Mission Control's Notes tab.
+
+**When to offer saving a note:**
+When you produce research results, analysis, summaries, meeting notes,
+decisions, action items, or long-form output — ask the user if they'd
+like it saved as a note before doing so.
+
+**How to reference notes:**
+Every note has a permanent link: `$NANOCLAW_API_URL/api/notes/{id}?token=$NANOCLAW_API_TOKEN`
+Include the note ID when sharing so other agents or the user can fetch it.
+
+**Before creating a duplicate:** Search existing notes first (`?q=keyword`)
+to avoid redundancy. Update an existing note if one covers the same topic.

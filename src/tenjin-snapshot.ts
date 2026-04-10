@@ -168,22 +168,41 @@ export async function fetchAndStoreTenjinSnapshot(
   // Covers both legacy display names and new API identifiers (with bidding suffixes)
   const NETWORK_TO_KEY: Record<string, string> = {
     // Legacy display names
-    'AppLovin': 'applovin', 'Google AdMob': 'google_adrev', 'Meta': 'meta',
-    'Unity': 'unity', 'Mintegral': 'mintegral', 'IronSource': 'ironsource',
-    'Yandex': 'yandex', 'Liftoff': 'ironsource',
+    AppLovin: 'applovin',
+    'Google AdMob': 'google_adrev',
+    Meta: 'meta',
+    Unity: 'unity',
+    Mintegral: 'mintegral',
+    IronSource: 'ironsource',
+    Yandex: 'yandex',
+    Liftoff: 'ironsource',
     // New API identifiers
-    'APPLOVIN_NETWORK': 'applovin', 'APPLOVIN_EXCHANGE': 'applovin',
-    'GOOGLE': 'google_adrev', 'ADMOB_BIDDING': 'google_adrev',
-    'FACEBOOK': 'meta', 'FACEBOOK_NETWORK': 'meta',
-    'UNITY_ADS': 'unity', 'UNITY_BIDDING': 'unity',
-    'MINTEGRAL': 'mintegral', 'MINTEGRAL_BIDDING': 'mintegral',
-    'IRONSOURCE': 'ironsource', 'IRONSOURCE_BIDDING': 'ironsource',
-    'YANDEX': 'yandex', 'YANDEX_BIDDING': 'yandex',
-    'VUNGLE': 'ironsource',
+    APPLOVIN_NETWORK: 'applovin',
+    APPLOVIN_EXCHANGE: 'applovin',
+    GOOGLE: 'google_adrev',
+    ADMOB_BIDDING: 'google_adrev',
+    FACEBOOK: 'meta',
+    FACEBOOK_NETWORK: 'meta',
+    UNITY_ADS: 'unity',
+    UNITY_BIDDING: 'unity',
+    MINTEGRAL: 'mintegral',
+    MINTEGRAL_BIDDING: 'mintegral',
+    IRONSOURCE: 'ironsource',
+    IRONSOURCE_BIDDING: 'ironsource',
+    YANDEX: 'yandex',
+    YANDEX_BIDDING: 'yandex',
+    VUNGLE: 'ironsource',
   };
   const LAG_DAYS: Record<string, number> = {
-    google_play: 30, apple: 45, applovin: 30, google_adrev: 30,
-    meta: 30, unity: 50, mintegral: 45, ironsource: 60, yandex: 45,
+    google_play: 30,
+    apple: 45,
+    applovin: 30,
+    google_adrev: 30,
+    meta: 30,
+    unity: 50,
+    mintegral: 45,
+    ironsource: 60,
+    yandex: 45,
   };
   for (const row of maxData.results || []) {
     const net = row.network || 'Other';
@@ -229,10 +248,10 @@ export async function fetchAndStoreTenjinSnapshot(
     )
   `);
   const androidIAP = Math.max(0, androidTotalRev - androidAdRev);
-  const iosIAP     = Math.max(0, iosTotalRev - iosAdRev);
+  const iosIAP = Math.max(0, iosTotalRev - iosAdRev);
   const iapUpserts: Array<[string, number]> = [
     ['google_play', androidIAP],
-    ['apple',       iosIAP],
+    ['apple', iosIAP],
   ];
   for (const [key, exp] of iapUpserts) {
     await getDbClient().execute({

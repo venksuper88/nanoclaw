@@ -6,10 +6,11 @@ import { OverviewView } from './components/OverviewView';
 import { TasksView } from './components/TasksView';
 import { SettingsView } from './components/SettingsView';
 import { TodosView } from './components/TodosView';
+import { NotesView } from './components/NotesView';
 import './styles.css';
 import { useNotifications } from './hooks/useNotifications';
 
-export type View = 'chat' | 'overview' | 'tasks' | 'todos' | 'settings';
+export type View = 'chat' | 'overview' | 'tasks' | 'todos' | 'notes' | 'settings';
 
 export interface Group {
   jid: string;
@@ -40,6 +41,7 @@ const TABS: { view: View; icon: string; label: string }[] = [
   { view: 'overview', icon: 'dashboard', label: 'Overview' },
   { view: 'tasks', icon: 'schedule', label: 'Tasks' },
   { view: 'todos', icon: 'checklist', label: 'Todos' },
+  { view: 'notes', icon: 'description', label: 'Notes' },
   { view: 'settings', icon: 'settings', label: 'Settings' },
 ];
 
@@ -68,7 +70,7 @@ export function App() {
 
   // Deep link: intercept clicks on #tasks, #todos, etc. to switch tabs
   useEffect(() => {
-    const VALID_VIEWS = ['chat', 'overview', 'tasks', 'todos', 'settings'];
+    const VALID_VIEWS = ['chat', 'overview', 'tasks', 'todos', 'notes', 'settings'];
     const onClick = (e: MouseEvent) => {
       const anchor = (e.target as HTMLElement).closest('a');
       if (!anchor) return;
@@ -82,12 +84,26 @@ export function App() {
     return () => document.removeEventListener('click', onClick);
   }, []);
 
-  // Swipe from left edge to open drawer
+  // Swipe from left edge to open drawer (also closes via right-to-left swipe)
   useEffect(() => {
     const onTouchStart = (e: TouchEvent) => {
       const touch = e.touches[0];
-      if (touch.clientX < 25) {
+      // Wide capture zone (40px) — iOS edge swipes often start at 0
+      if (touch.clientX < 40) {
         swipeRef.current = { startX: touch.clientX, startY: touch.clientY };
+      } else if (drawerOpen && touch.clientX > 100) {
+        // Track swipe-to-close on overlay area
+        swipeRef.current = { startX: touch.clientX, startY: touch.clientY };
+      }
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (!swipeRef.current) return;
+      // Check if gesture is mostly horizontal early and prevent vertical scroll
+      const touch = e.touches[0];
+      const dx = Math.abs(touch.clientX - swipeRef.current.startX);
+      const dy = Math.abs(touch.clientY - swipeRef.current.startY);
+      if (dx > 10 && dx > dy * 1.5) {
+        e.preventDefault();
       }
     };
     const onTouchEnd = (e: TouchEvent) => {
@@ -95,16 +111,23 @@ export function App() {
       const touch = e.changedTouches[0];
       const dx = touch.clientX - swipeRef.current.startX;
       const dy = Math.abs(touch.clientY - swipeRef.current.startY);
+      const startX = swipeRef.current.startX;
       swipeRef.current = null;
-      if (dx > 60 && dy < 100) setDrawerOpen(true);
+      if (dy > 100) return; // too vertical
+      // Open: swipe right from left edge
+      if (startX < 40 && dx > 50) setDrawerOpen(true);
+      // Close: swipe left anywhere when drawer is open
+      if (drawerOpen && dx < -50) setDrawerOpen(false);
     };
     document.addEventListener('touchstart', onTouchStart, { passive: true });
+    document.addEventListener('touchmove', onTouchMove, { passive: false });
     document.addEventListener('touchend', onTouchEnd, { passive: true });
     return () => {
       document.removeEventListener('touchstart', onTouchStart);
+      document.removeEventListener('touchmove', onTouchMove);
       document.removeEventListener('touchend', onTouchEnd);
     };
-  }, []);
+  }, [drawerOpen]);
 
   // Fix mobile keyboard — resize app to match visible viewport
   const appRef = useRef<HTMLDivElement>(null);
@@ -325,6 +348,16 @@ export function App() {
           </div>
           <span className="mi" style={{ fontSize: 16, color: 'var(--text3)' }}>open_in_new</span>
         </a>
+        <a href="/analytics/" className="agent-card" style={{ textDecoration: 'none', color: 'inherit' }}>
+          <div className="agent-avatar" style={{ background: 'var(--blue, #3B82F6)' }}>
+            <span className="mi" style={{ fontSize: 22 }}>analytics</span>
+          </div>
+          <div className="agent-info">
+            <div className="agent-name">Analytics</div>
+            <div className="agent-status">Metabase Dashboards</div>
+          </div>
+          <span className="mi" style={{ fontSize: 16, color: 'var(--text3)' }}>open_in_new</span>
+        </a>
       </div>
 
       {/* Main content */}
@@ -349,6 +382,7 @@ export function App() {
         )}
         {view === 'tasks' && <TasksView />}
         {view === 'todos' && <TodosView />}
+        {view === 'notes' && <NotesView />}
         {view === 'settings' && <SettingsView groups={groups} />}
       </main>
 

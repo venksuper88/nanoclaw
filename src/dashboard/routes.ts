@@ -28,9 +28,26 @@ import {
   updateTask,
   deleteTask,
   updateDashboardToken,
+  createNote,
+  createNoteFolder,
   createTodo,
+  deleteNote,
+  deleteNoteFolder,
+  ensureDefaultFolder,
+  ensureGroupFolder,
+  getAllNotes,
   getAllTodos,
+  getDeletedNotes,
+  getNoteAuditLog,
+  getNoteById,
+  getNoteFoldersByUser,
   getTodoById,
+  logNoteAudit,
+  purgeNote,
+  restoreNote,
+  searchNotes,
+  updateNote,
+  updateNoteFolder,
   updateTodo,
   deleteTodo,
   getAllScopeDefs,
@@ -365,8 +382,11 @@ export async function createRouter(): Promise<Router> {
       const commandName = parts[0];
       const group = groups[chatJid];
       if (commandName && group) {
-        const { runCommand: execCommand, resolveCommand: resolveCmd, mapArgsToInput } =
-          await import('../commands.js');
+        const {
+          runCommand: execCommand,
+          resolveCommand: resolveCmd,
+          mapArgsToInput,
+        } = await import('../commands.js');
         const resolved = resolveCmd(commandName, group.folder);
         if (resolved) {
           // Store the user's command message in DB for chat history
@@ -683,6 +703,211 @@ export async function createRouter(): Promise<Router> {
     }
     await deleteTodo(req.params.id as string);
     res.json({ ok: true });
+  });
+
+  // ── Note Folders ──
+
+  router.get('/api/notes/folders', async (req: Request, res: Response) => {
+    const user = getUser(req);
+    const userId = user.name.toLowerCase();
+    await ensureDefaultFolder(userId);
+    const folders = await getNoteFoldersByUser(userId);
+    res.json({ ok: true, data: folders });
+  });
+
+  router.post('/api/notes/folders', async (req: Request, res: Response) => {
+    const user = getUser(req);
+    const userId = user.name.toLowerCase();
+    const { name, parent_id, icon, color, sort_order } = req.body;
+    if (!name) {
+      res.status(400).json({ ok: false, error: 'name required' });
+      return;
+    }
+    const id = `nf-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    await createNoteFolder({
+      id,
+      user_id: userId,
+      name,
+      parent_id: parent_id || null,
+      icon: icon || 'folder',
+      color: color || null,
+      sort_order: sort_order ?? 0,
+      created_at: new Date().toISOString(),
+    });
+    const folders = await getNoteFoldersByUser(userId);
+    res.json({ ok: true, data: folders });
+  });
+
+  router.patch(
+    '/api/notes/folders/:id',
+    async (req: Request, res: Response) => {
+      await updateNoteFolder(req.params.id as string, req.body);
+      const user = getUser(req);
+      const folders = await getNoteFoldersByUser(user.name.toLowerCase());
+      res.json({ ok: true, data: folders });
+    },
+  );
+
+  router.delete(
+    '/api/notes/folders/:id',
+    async (req: Request, res: Response) => {
+      await deleteNoteFolder(req.params.id as string);
+      const user = getUser(req);
+      const folders = await getNoteFoldersByUser(user.name.toLowerCase());
+      res.json({ ok: true, data: folders });
+    },
+  );
+
+  // ── Notes ──
+
+  router.get('/api/notes', async (req: Request, res: Response) => {
+    const user = getUser(req);
+    const userId = user.name.toLowerCase();
+    const q = req.query.q as string | undefined;
+    const folderId = req.query.folder as string | undefined;
+    if (q) {
+      const notes = await searchNotes(userId, q);
+      res.json({ ok: true, data: notes });
+      return;
+    }
+    const notes = await getAllNotes();
+    let filtered = notes.filter((n) => n.user_id === userId);
+    if (folderId) {
+      filtered = filtered.filter((n) => n.folder_id === folderId);
+    }
+    res.json({ ok: true, data: filtered });
+  });
+
+  // Trash: list deleted notes (must be before :id route)
+  router.get('/api/notes/trash', async (req: Request, res: Response) => {
+    const user = getUser(req);
+    const deleted = await getDeletedNotes(user.name.toLowerCase());
+    res.json({ ok: true, data: deleted });
+  });
+
+  router.get('/api/notes/:id', async (req: Request, res: Response) => {
+    const note = await getNoteById(req.params.id as string);
+    if (!note) {
+      res.status(404).json({ ok: false, error: 'Not found' });
+      return;
+    }
+    res.json({ ok: true, data: note });
+  });
+
+  router.post('/api/notes', async (req: Request, res: Response) => {
+    const user = getUser(req);
+    const { title, content, tags, user_id, folder_id, created_by } = req.body;
+    if (!title) {
+      res.status(400).json({ ok: false, error: 'title required' });
+      return;
+    }
+    const userId = user_id || user.name.toLowerCase();
+    const groupHeader = req.headers['x-group-folder'] as string | undefined;
+    const actor = created_by || groupHeader || 'dashboard';
+
+    // Auto-create/resolve group folder for agents.
+    // If the agent didn't specify a folder (or only defaulted to General),
+    // file into its dedicated group folder instead.
+    let resolvedFolderId = folder_id || null;
+    if (actor !== 'dashboard' && actor.startsWith('dashboard_')) {
+      const groupFolderId = await ensureGroupFolder(userId, actor);
+      if (!resolvedFolderId) {
+        resolvedFolderId = groupFolderId;
+      } else {
+        // Check if agent filed into the default General folder — override it
+        const defaultFolderId = await ensureDefaultFolder(userId);
+        if (resolvedFolderId === defaultFolderId) {
+          resolvedFolderId = groupFolderId;
+        }
+      }
+    }
+
+    // Dedup: if a note with the same title+actor was created in the last 60s, return it
+    const dedup = await getDbClient().execute({
+      sql: `SELECT id FROM notes WHERE user_id = ? AND title = ? AND created_by = ?
+            AND deleted_at IS NULL AND created_at > ? LIMIT 1`,
+      args: [userId, title, actor, new Date(Date.now() - 60000).toISOString()],
+    });
+    if (dedup.rows.length > 0) {
+      const existing = await getNoteById((dedup.rows[0] as unknown as { id: string }).id);
+      res.json({ ok: true, data: existing, deduplicated: true });
+      return;
+    }
+
+    const id = `note-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const now = new Date().toISOString();
+    await createNote({
+      id,
+      user_id: userId,
+      folder_id: resolvedFolderId,
+      title,
+      content: content || '',
+      tags: tags || null,
+      created_by: actor,
+      created_at: now,
+      updated_at: now,
+      deleted_at: null,
+    }, actor);
+    const note = await getNoteById(id);
+    res.json({ ok: true, data: note });
+  });
+
+  router.patch('/api/notes/:id', async (req: Request, res: Response) => {
+    const note = await getNoteById(req.params.id as string);
+    if (!note) {
+      res.status(404).json({ ok: false, error: 'Not found' });
+      return;
+    }
+    const actor = req.body.updated_by
+      || (req.headers['x-group-folder'] as string)
+      || 'dashboard';
+    const { updated_by, ...updates } = req.body;
+    await updateNote(req.params.id as string, updates, actor);
+    const updated = await getNoteById(req.params.id as string);
+    res.json({ ok: true, data: updated });
+  });
+
+  router.delete('/api/notes/:id', async (req: Request, res: Response) => {
+    const note = await getNoteById(req.params.id as string);
+    if (!note) {
+      res.status(404).json({ ok: false, error: 'Not found' });
+      return;
+    }
+    const actor = (req.query.actor as string)
+      || (req.headers['x-group-folder'] as string)
+      || 'dashboard';
+    await deleteNote(req.params.id as string, actor);
+    res.json({ ok: true });
+  });
+
+  // Restore a deleted note
+  router.post('/api/notes/:id/restore', async (req: Request, res: Response) => {
+    const note = await getNoteById(req.params.id as string);
+    if (!note || !note.deleted_at) {
+      res.status(404).json({ ok: false, error: 'Not found in trash' });
+      return;
+    }
+    const actor = req.body.actor || 'dashboard';
+    await restoreNote(req.params.id as string, actor);
+    const restored = await getNoteById(req.params.id as string);
+    res.json({ ok: true, data: restored });
+  });
+
+  // Permanently delete
+  router.delete('/api/notes/:id/purge', async (req: Request, res: Response) => {
+    const note = await getNoteById(req.params.id as string);
+    if (!note) {
+      res.status(404).json({ ok: false, error: 'Not found' });
+      return;
+    }
+    await purgeNote(req.params.id as string);
+    res.json({ ok: true });
+  });
+
+  // Audit log for a note
+  router.get('/api/notes/:id/audit', async (req: Request, res: Response) => {
+    const log = await getNoteAuditLog(req.params.id as string);
+    res.json({ ok: true, data: log });
   });
 
   // ── Token reminder group ──
@@ -1408,7 +1633,9 @@ export async function createRouter(): Promise<Router> {
     ];
     if (groupFolder) {
       const allGroups = await getAllRegisteredGroups();
-      const group = Object.values(allGroups).find(g => g.folder === groupFolder);
+      const group = Object.values(allGroups).find(
+        (g) => g.folder === groupFolder,
+      );
       if (group?.workDir) {
         skillSearchDirs.push(path.resolve(group.workDir, '.claude', 'skills'));
       }
@@ -1453,7 +1680,7 @@ export async function createRouter(): Promise<Router> {
   });
 
   // ── MCP Servers (from ~/.claude.json + .mcp.json in group workDirs) ──
-  router.get('/api/mcp-servers', async (_req: Request, res: Response) => {
+  router.get('/api/mcp-servers', async (req: Request, res: Response) => {
     const homeClaudeJson = path.join(os.homedir(), '.claude.json');
     const seen = new Set<string>();
     const servers: Array<{ name: string; type: string; source: string }> = [];
@@ -1463,6 +1690,8 @@ export async function createRouter(): Promise<Router> {
       const type = config?.type === 'http' ? 'http' : 'stdio';
       servers.push({ name, type, source });
     };
+    // If a group folder is specified, only return MCPs reachable by that group
+    const filterFolder = req.query.folder as string | undefined;
     try {
       // Global MCP servers: mcp-servers.json (stable) + ~/.claude.json (volatile)
       const mcpConfigPath = path.join(process.cwd(), 'mcp-servers.json');
@@ -1482,23 +1711,39 @@ export async function createRouter(): Promise<Router> {
           addServer(name, config, 'global');
         }
       }
-      // Project-scoped MCP servers from .mcp.json in group workDirs (walk up tree)
-      const groups = await getAllRegisteredGroups();
-      const scannedFiles = new Set<string>();
-      for (const group of Object.values(groups)) {
-        if (!group.workDir) continue;
-        const { findMcpJsonFiles } = await import('../tmux-runner.js');
-        for (const mcpJson of findMcpJsonFiles(path.resolve(group.workDir))) {
-          if (scannedFiles.has(mcpJson)) continue;
-          scannedFiles.add(mcpJson);
-          try {
-            const parsed = JSON.parse(fs.readFileSync(mcpJson, 'utf-8'));
-            for (const [name, config] of Object.entries(
-              parsed.mcpServers || {},
-            )) {
-              addServer(name, config, path.dirname(mcpJson));
-            }
-          } catch {}
+      // Project-scoped MCP servers from .mcp.json files
+      const { findMcpJsonFiles, groupWorkDir } = await import('../tmux-runner.js');
+      if (filterFolder) {
+        // Only scan the specific group's workDir
+        const groups = await getAllRegisteredGroups();
+        const group = Object.values(groups).find(g => g.folder === filterFolder);
+        if (group) {
+          const workDir = groupWorkDir(group.folder, group.workDir);
+          for (const mcpJson of findMcpJsonFiles(path.resolve(workDir))) {
+            try {
+              const parsed = JSON.parse(fs.readFileSync(mcpJson, 'utf-8'));
+              for (const [name, config] of Object.entries(parsed.mcpServers || {})) {
+                addServer(name, config, path.dirname(mcpJson));
+              }
+            } catch {}
+          }
+        }
+      } else {
+        // No filter — scan all group workDirs (legacy behavior)
+        const groups = await getAllRegisteredGroups();
+        const scannedFiles = new Set<string>();
+        for (const group of Object.values(groups)) {
+          if (!group.workDir) continue;
+          for (const mcpJson of findMcpJsonFiles(path.resolve(group.workDir))) {
+            if (scannedFiles.has(mcpJson)) continue;
+            scannedFiles.add(mcpJson);
+            try {
+              const parsed = JSON.parse(fs.readFileSync(mcpJson, 'utf-8'));
+              for (const [name, config] of Object.entries(parsed.mcpServers || {})) {
+                addServer(name, config, path.dirname(mcpJson));
+              }
+            } catch {}
+          }
         }
       }
     } catch {}
@@ -1666,14 +1911,17 @@ export async function createRouter(): Promise<Router> {
     },
   );
 
-  router.post('/api/alerts/dismiss-all', async (_req: Request, res: Response) => {
-    try {
-      await dismissAllAlerts();
-      res.json({ ok: true, data: null });
-    } catch (err) {
-      res.status(500).json({ ok: false, error: String(err) });
-    }
-  });
+  router.post(
+    '/api/alerts/dismiss-all',
+    async (_req: Request, res: Response) => {
+      try {
+        await dismissAllAlerts();
+        res.json({ ok: true, data: null });
+      } catch (err) {
+        res.status(500).json({ ok: false, error: String(err) });
+      }
+    },
+  );
 
   // ── Skills (walk-up discovery: group → workDir ancestors → container → global) ──
   router.get('/api/skills', async (req: Request, res: Response) => {
@@ -1687,7 +1935,11 @@ export async function createRouter(): Promise<Router> {
     }> = [];
     const seenNames = new Set<string>();
 
-    const scanSkillDir = (dirPath: string, type: string, folderLabel: string) => {
+    const scanSkillDir = (
+      dirPath: string,
+      type: string,
+      folderLabel: string,
+    ) => {
       if (!fs.existsSync(dirPath)) return;
       for (const dir of fs.readdirSync(dirPath)) {
         if (seenNames.has(dir)) continue;
@@ -1717,12 +1969,14 @@ export async function createRouter(): Promise<Router> {
     // 1. Container-wide skills — available to all groups
     scanSkillDir(
       path.resolve(process.cwd(), 'container', 'skills'),
-      'container', 'container/skills',
+      'container',
+      'container/skills',
     );
     // 2. Global user skills (~/.claude/skills/)
     scanSkillDir(
       path.join(os.homedir(), '.claude', 'skills'),
-      'global', '~/.claude/skills',
+      'global',
+      '~/.claude/skills',
     );
 
     // Native project skills (read-only) — from the group's workDir if it points
@@ -1730,11 +1984,16 @@ export async function createRouter(): Promise<Router> {
     // skills synced into the project by setupClaudeConfig).
     if (groupFolder) {
       const allGroups = await getAllRegisteredGroups();
-      const group = Object.values(allGroups).find(g => g.folder === groupFolder);
+      const group = Object.values(allGroups).find(
+        (g) => g.folder === groupFolder,
+      );
       if (group?.workDir) {
         scanSkillDir(
           path.resolve(group.workDir, '.claude', 'skills'),
-          'project', path.resolve(group.workDir, '.claude', 'skills').replace(os.homedir(), '~'),
+          'project',
+          path
+            .resolve(group.workDir, '.claude', 'skills')
+            .replace(os.homedir(), '~'),
         );
       }
     }
@@ -1748,22 +2007,88 @@ export async function createRouter(): Promise<Router> {
     // Token estimates are approximate based on tool definition size (name + description + schema)
     // Token estimates from Claude's actual context report (ground truth, Apr 2026)
     const tools = [
-      { name: 'send_message', description: 'Send a message to the user/group with optional file attachment', tokenEstimate: 213 },
-      { name: 'schedule_task', description: 'Schedule recurring or one-time tasks with cron/interval/once', tokenEstimate: 868 },
-      { name: 'list_tasks', description: 'List all scheduled tasks for this group', tokenEstimate: 77 },
-      { name: 'pause_task', description: 'Pause a scheduled task', tokenEstimate: 90 },
-      { name: 'resume_task', description: 'Resume a paused task', tokenEstimate: 80 },
-      { name: 'cancel_task', description: 'Cancel and delete a scheduled task', tokenEstimate: 85 },
-      { name: 'update_task', description: 'Update an existing scheduled task', tokenEstimate: 185 },
-      { name: 'register_group', description: 'Register a new chat/group (main group only)', tokenEstimate: 409 },
-      { name: 'save_memory', description: 'Save a fact or preference to long-term memory', tokenEstimate: 247 },
-      { name: 'add_todo', description: 'Add a todo with priority, due date, reminder, recurrence', tokenEstimate: 323 },
-      { name: 'update_todo', description: 'Update an existing todo item', tokenEstimate: 276 },
-      { name: 'complete_todo', description: 'Mark a todo as done', tokenEstimate: 81 },
-      { name: 'delete_todo', description: 'Permanently delete a todo item', tokenEstimate: 84 },
-      { name: 'list_todos', description: "List the user's non-completed todos", tokenEstimate: 96 },
-      { name: 'run_command', description: 'Run a registered command/script', tokenEstimate: 260 },
-      { name: 'list_commands', description: 'List available commands for this group', tokenEstimate: 76 },
+      {
+        name: 'send_message',
+        description:
+          'Send a message to the user/group with optional file attachment',
+        tokenEstimate: 213,
+      },
+      {
+        name: 'schedule_task',
+        description:
+          'Schedule recurring or one-time tasks with cron/interval/once',
+        tokenEstimate: 868,
+      },
+      {
+        name: 'list_tasks',
+        description: 'List all scheduled tasks for this group',
+        tokenEstimate: 77,
+      },
+      {
+        name: 'pause_task',
+        description: 'Pause a scheduled task',
+        tokenEstimate: 90,
+      },
+      {
+        name: 'resume_task',
+        description: 'Resume a paused task',
+        tokenEstimate: 80,
+      },
+      {
+        name: 'cancel_task',
+        description: 'Cancel and delete a scheduled task',
+        tokenEstimate: 85,
+      },
+      {
+        name: 'update_task',
+        description: 'Update an existing scheduled task',
+        tokenEstimate: 185,
+      },
+      {
+        name: 'register_group',
+        description: 'Register a new chat/group (main group only)',
+        tokenEstimate: 409,
+      },
+      {
+        name: 'save_memory',
+        description: 'Save a fact or preference to long-term memory',
+        tokenEstimate: 247,
+      },
+      {
+        name: 'add_todo',
+        description: 'Add a todo with priority, due date, reminder, recurrence',
+        tokenEstimate: 323,
+      },
+      {
+        name: 'update_todo',
+        description: 'Update an existing todo item',
+        tokenEstimate: 276,
+      },
+      {
+        name: 'complete_todo',
+        description: 'Mark a todo as done',
+        tokenEstimate: 81,
+      },
+      {
+        name: 'delete_todo',
+        description: 'Permanently delete a todo item',
+        tokenEstimate: 84,
+      },
+      {
+        name: 'list_todos',
+        description: "List the user's non-completed todos",
+        tokenEstimate: 96,
+      },
+      {
+        name: 'run_command',
+        description: 'Run a registered command/script',
+        tokenEstimate: 260,
+      },
+      {
+        name: 'list_commands',
+        description: 'List available commands for this group',
+        tokenEstimate: 76,
+      },
     ];
     res.json({ ok: true, data: tools });
   });

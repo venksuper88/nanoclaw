@@ -117,6 +117,41 @@ export interface Todo {
   updated_at: string;
 }
 
+// --- Notes ---
+
+export interface NoteFolder {
+  id: string;
+  user_id: string;
+  name: string;
+  parent_id: string | null; // NULL = root level
+  icon: string | null; // Material icon name
+  color: string | null; // hex color
+  sort_order: number;
+  created_at: string;
+}
+
+export interface Note {
+  id: string;
+  user_id: string;
+  folder_id: string | null; // NULL = root/unfiled
+  title: string;
+  content: string;
+  tags: string | null; // comma-separated
+  created_by: string; // 'dashboard' or group folder
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null; // soft-delete timestamp
+}
+
+export interface NoteAudit {
+  id: string;
+  note_id: string;
+  action: 'create' | 'update' | 'delete' | 'restore';
+  actor: string; // who performed the action
+  details: string | null; // JSON with changed fields
+  created_at: string;
+}
+
 // --- Email Classification & Structured Extraction ---
 
 /** Schema definition for an email type — loaded from groups/{folder}/email-schemas.json */

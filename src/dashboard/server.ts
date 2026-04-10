@@ -44,15 +44,31 @@ export async function startDashboard(
 
   app.use(await createRouter());
 
+  // Back-to-dashboard snippet injected into sub-app index.html
+  const backButtonSnippet = `<div id="mc-back" style="position:fixed;top:env(safe-area-inset-top,0);left:0;right:0;height:52px;background:var(--surface,#fff);border-bottom:1px solid rgba(0,0,0,.08);display:flex;align-items:center;padding:0 16px;gap:12px;z-index:9999;font-family:Inter,-apple-system,system-ui,sans-serif">
+<a href="/" style="display:flex;align-items:center;gap:8px;text-decoration:none;color:inherit;font-size:14px;font-weight:500">
+<span class="material-symbols-outlined" style="font-size:22px">arrow_back</span>Mission Control</a></div>
+<style>#mc-back~#root,#mc-back~div{padding-top:52px!important}</style>`;
+  const serveSubAppIndex = (indexPath: string, res: express.Response) => {
+    if (!fs.existsSync(indexPath)) { res.status(404).send('App not found'); return; }
+    let html = fs.readFileSync(indexPath, 'utf-8');
+    html = html.replace('</body>', backButtonSnippet + '</body>');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Content-Type', 'text/html');
+    res.send(html);
+  };
+
   // Finance sub-app static files
   const FINANCE_DIR = path.join(process.cwd(), 'public', 'finance');
+  // Serve index.html with back button injected
+  app.get('/finance/', (_req, res) => serveSubAppIndex(path.join(FINANCE_DIR, 'index.html'), res));
+  app.get('/finance', (_req, res) => res.redirect('/finance/'));
   app.use(
     '/finance',
     express.static(FINANCE_DIR, {
+      index: false, // Don't auto-serve index.html — we handle it above
       setHeaders: (res, filePath) => {
-        if (filePath.endsWith('index.html')) {
-          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        } else if (filePath.includes('/assets/')) {
+        if (filePath.includes('/assets/')) {
           res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
         }
       },
@@ -60,24 +76,19 @@ export async function startDashboard(
   );
   // Finance SPA fallback — serve finance index.html for all /finance/* routes
   app.get('/finance/{*path}', (_req, res) => {
-    const financeIndex = path.join(FINANCE_DIR, 'index.html');
-    if (fs.existsSync(financeIndex)) {
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.sendFile(financeIndex);
-    } else {
-      res.status(404).send('Finance app not found');
-    }
+    serveSubAppIndex(path.join(FINANCE_DIR, 'index.html'), res);
   });
 
   // Creatives sub-app static files
   const CREATIVES_DIR = path.join(process.cwd(), 'public', 'creatives');
+  app.get('/creatives/', (_req, res) => serveSubAppIndex(path.join(CREATIVES_DIR, 'index.html'), res));
+  app.get('/creatives', (_req, res) => res.redirect('/creatives/'));
   app.use(
     '/creatives',
     express.static(CREATIVES_DIR, {
+      index: false,
       setHeaders: (res, filePath) => {
-        if (filePath.endsWith('index.html')) {
-          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        } else if (filePath.includes('/assets/')) {
+        if (filePath.includes('/assets/')) {
           res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
         }
       },
@@ -118,13 +129,26 @@ export async function startDashboard(
 
   // Creatives SPA fallback — serve creatives index.html for all /creatives/* routes
   app.get('/creatives/{*path}', (_req, res) => {
-    const creativesIndex = path.join(CREATIVES_DIR, 'index.html');
-    if (fs.existsSync(creativesIndex)) {
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.sendFile(creativesIndex);
-    } else {
-      res.status(404).send('Creatives app not found');
-    }
+    serveSubAppIndex(path.join(CREATIVES_DIR, 'index.html'), res);
+  });
+
+  // Analytics (Metabase) sub-app
+  const ANALYTICS_DIR = path.join(process.cwd(), 'public', 'analytics');
+  app.get('/analytics/', (_req, res) => serveSubAppIndex(path.join(ANALYTICS_DIR, 'index.html'), res));
+  app.get('/analytics', (_req, res) => res.redirect('/analytics/'));
+  app.use(
+    '/analytics',
+    express.static(ANALYTICS_DIR, {
+      index: false,
+      setHeaders: (res, filePath) => {
+        if (filePath.includes('/assets/')) {
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+      },
+    }),
+  );
+  app.get('/analytics/{*path}', (_req, res) => {
+    serveSubAppIndex(path.join(ANALYTICS_DIR, 'index.html'), res);
   });
 
   // Static files (SPA)

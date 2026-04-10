@@ -18,7 +18,12 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { DATA_DIR, GROUPS_DIR } from './config.js';
+import {
+  DASHBOARD_PORT,
+  DASHBOARD_TOKEN,
+  DATA_DIR,
+  GROUPS_DIR,
+} from './config.js';
 import { resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -334,7 +339,9 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
       Object.assign(allMcps, homeClaudeParsed.mcpServers || {});
       // Collect MCP servers from .mcp.json in group's workDir (walk up to project root)
       if (group.workDir) {
-        for (const mcpJsonPath of findMcpJsonFiles(path.resolve(group.workDir))) {
+        for (const mcpJsonPath of findMcpJsonFiles(
+          path.resolve(group.workDir),
+        )) {
           try {
             const mcpJson = JSON.parse(fs.readFileSync(mcpJsonPath, 'utf-8'));
             for (const [name, config] of Object.entries(
@@ -399,14 +406,20 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
     // workDir IS the group folder) — would rm the source then fail to copy.
     if (path.resolve(srcDir) === path.resolve(projectSkills)) {
       // Still mark existing skills as "synced" so the cleanup loop doesn't delete them
-      for (const skillDir of fs.readdirSync(srcDir)) syncedSkillNames.add(skillDir);
+      for (const skillDir of fs.readdirSync(srcDir))
+        syncedSkillNames.add(skillDir);
       return;
     }
     for (const skillDir of fs.readdirSync(srcDir)) {
       if (syncedSkillNames.has(skillDir)) continue; // closest wins
       const src = path.join(srcDir, skillDir);
       if (!fs.statSync(src).isDirectory()) continue;
-      if (allowedSkills && allowedSkills.length > 0 && !allowedSkills.includes(skillDir)) continue;
+      if (
+        allowedSkills &&
+        allowedSkills.length > 0 &&
+        !allowedSkills.includes(skillDir)
+      )
+        continue;
       syncedSkillNames.add(skillDir);
       const dst = path.join(projectSkills, skillDir);
       if (fs.existsSync(dst)) {
@@ -457,6 +470,8 @@ export NANOCLAW_CHAT_JID="${chatJid}"
 export NANOCLAW_GROUP_FOLDER="${group.folder}"
 export NANOCLAW_IS_MAIN="${group.isMain ? '1' : '0'}"
 export NANOCLAW_IPC_DIR="${ipcDir}"
+export NANOCLAW_API_URL="http://localhost:${DASHBOARD_PORT}"
+export NANOCLAW_API_TOKEN="${DASHBOARD_TOKEN}"
 MODEL="${
     group.contextWindow === '1m'
       ? group.model === 'sonnet'

@@ -277,13 +277,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Intercept ! commands (scripts) before they reach the agent.
   // Skip is_from_me messages — the dashboard route already handled those.
   const lastMsg = missedMessages[missedMessages.length - 1];
-  if (lastMsg && !lastMsg.is_from_me && lastMsg.content.trim().startsWith('!')) {
+  if (
+    lastMsg &&
+    !lastMsg.is_from_me &&
+    lastMsg.content.trim().startsWith('!')
+  ) {
     const text = lastMsg.content.trim();
     const parts = text.slice(1).trim().split(/\s+/);
     const commandName = parts[0];
     if (commandName) {
-      const { runCommand: execCommand, resolveCommand: resolveCmd, mapArgsToInput } =
-        await import('./commands.js');
+      const {
+        runCommand: execCommand,
+        resolveCommand: resolveCmd,
+        mapArgsToInput,
+      } = await import('./commands.js');
       const resolved = resolveCmd(commandName, group.folder);
       if (resolved) {
         const sendMsg = async (msg: string) => {
@@ -512,9 +519,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         }
         // Record token usage for analytics (tagged with session mode + actual cost)
         const costUsd = result.performance?.costUsd ?? 0;
-        recordTokenUsage(group.folder, result.usage, sessionMode, costUsd).catch(
-          () => {},
-        );
+        recordTokenUsage(
+          group.folder,
+          result.usage,
+          sessionMode,
+          costUsd,
+        ).catch(() => {});
       }
 
       // Performance alerts — check thresholds and emit alerts
@@ -1115,9 +1125,14 @@ function recoverOrphanedPrompts(): void {
           const msgMatch = content.match(/<message[^>]*>([^<]*)<\/message>/g);
           if (msgMatch) {
             const last = msgMatch[msgMatch.length - 1];
-            preview = last.replace(/<[^>]+>/g, '').trim().slice(0, 80);
+            preview = last
+              .replace(/<[^>]+>/g, '')
+              .trim()
+              .slice(0, 80);
           }
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
 
         logger.warn(
           { folder: group.folder, file: pf, ageMs: age },
