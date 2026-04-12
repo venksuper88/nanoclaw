@@ -1403,13 +1403,23 @@ export async function syncNoteItems(
     if (prev) {
       // Update existing item
       const newStatus = item.checked ? 'done' : 'pending';
-      if (prev.title !== item.title || prev.status !== newStatus || prev.position !== i) {
+      if (
+        prev.title !== item.title ||
+        prev.status !== newStatus ||
+        prev.position !== i
+      ) {
         await db.execute({
           sql: 'UPDATE note_items SET title = ?, status = ?, position = ?, updated_at = ? WHERE id = ?',
           args: [item.title, newStatus, i, now, prev.id],
         });
       }
-      result.push({ ...prev, title: item.title, status: newStatus as 'pending' | 'done', position: i, updated_at: now });
+      result.push({
+        ...prev,
+        title: item.title,
+        status: newStatus as 'pending' | 'done',
+        position: i,
+        updated_at: now,
+      });
     } else {
       // Create new item
       const id = `ni-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -1450,7 +1460,17 @@ export async function syncNoteItems(
 
 export async function updateNoteItem(
   id: string,
-  updates: Partial<Pick<NoteItem, 'title' | 'status' | 'due_date' | 'remind_at' | 'recurrence' | 'reminder_fired_at'>>,
+  updates: Partial<
+    Pick<
+      NoteItem,
+      | 'title'
+      | 'status'
+      | 'due_date'
+      | 'remind_at'
+      | 'recurrence'
+      | 'reminder_fired_at'
+    >
+  >,
 ): Promise<void> {
   const fields: string[] = [];
   const values: unknown[] = [];
@@ -1468,13 +1488,31 @@ export async function updateNoteItem(
   });
 }
 
-export async function createNoteItem(noteId: string, title: string): Promise<NoteItem> {
+export async function createNoteItem(
+  noteId: string,
+  title: string,
+): Promise<NoteItem> {
   const now = new Date().toISOString();
   const id = `ni-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   // Get max position
-  const maxPos = await db.execute({ sql: 'SELECT MAX(position) as mp FROM note_items WHERE note_id = ?', args: [noteId] });
+  const maxPos = await db.execute({
+    sql: 'SELECT MAX(position) as mp FROM note_items WHERE note_id = ?',
+    args: [noteId],
+  });
   const position = ((maxPos.rows[0] as any)?.mp ?? -1) + 1;
-  const item: NoteItem = { id, note_id: noteId, title, status: 'pending', position, due_date: null, remind_at: null, recurrence: null, reminder_fired_at: null, created_at: now, updated_at: now };
+  const item: NoteItem = {
+    id,
+    note_id: noteId,
+    title,
+    status: 'pending',
+    position,
+    due_date: null,
+    remind_at: null,
+    recurrence: null,
+    reminder_fired_at: null,
+    created_at: now,
+    updated_at: now,
+  };
   await db.execute({
     sql: `INSERT INTO note_items (id, note_id, title, status, position, due_date, remind_at, recurrence, reminder_fired_at, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)`,

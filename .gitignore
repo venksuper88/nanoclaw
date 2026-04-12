@@ -35,3 +35,15 @@ groups/*/*
 
 agents-sdk-docs
 .agents/
+
+# Claude Code runtime
+.claude/worktrees/
+
+# Creatives portal build output & pipeline data
+public/creatives/
+
+# Runtime database
+memory.db
+
+# One-off scripts
+query_groups.js

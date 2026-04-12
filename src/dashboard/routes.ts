@@ -650,16 +650,31 @@ export async function createRouter(): Promise<Router> {
   });
 
   router.post('/api/tasks', async (req: Request, res: Response) => {
-    const { prompt, schedule_type, schedule_value, context_mode, group_folder, chat_jid } = req.body;
+    const {
+      prompt,
+      schedule_type,
+      schedule_value,
+      context_mode,
+      group_folder,
+      chat_jid,
+    } = req.body;
     if (!prompt || !schedule_type || !schedule_value) {
-      res.status(400).json({ ok: false, error: 'prompt, schedule_type, and schedule_value required' });
+      res
+        .status(400)
+        .json({
+          ok: false,
+          error: 'prompt, schedule_type, and schedule_value required',
+        });
       return;
     }
 
-    const groupFolder = req.headers['x-group-folder'] as string || group_folder;
+    const groupFolder =
+      (req.headers['x-group-folder'] as string) || group_folder;
     const chatJid = chat_jid;
     if (!groupFolder || !chatJid) {
-      res.status(400).json({ ok: false, error: 'group_folder and chat_jid required' });
+      res
+        .status(400)
+        .json({ ok: false, error: 'group_folder and chat_jid required' });
       return;
     }
 
@@ -667,37 +682,61 @@ export async function createRouter(): Promise<Router> {
     let nextRun: string | null = null;
     if (schedule_type === 'cron') {
       try {
-        const interval = CronExpressionParser.parse(schedule_value, { tz: TIMEZONE });
+        const interval = CronExpressionParser.parse(schedule_value, {
+          tz: TIMEZONE,
+        });
         nextRun = interval.next().toISOString();
       } catch {
-        res.status(400).json({ ok: false, error: `Invalid cron: "${schedule_value}"` });
+        res
+          .status(400)
+          .json({ ok: false, error: `Invalid cron: "${schedule_value}"` });
         return;
       }
     } else if (schedule_type === 'interval') {
       const ms = parseInt(schedule_value, 10);
       if (isNaN(ms) || ms <= 0) {
-        res.status(400).json({ ok: false, error: `Invalid interval: "${schedule_value}"` });
+        res
+          .status(400)
+          .json({ ok: false, error: `Invalid interval: "${schedule_value}"` });
         return;
       }
       nextRun = new Date(Date.now() + ms).toISOString();
     } else if (schedule_type === 'once') {
-      if (/[Zz]$/.test(schedule_value) || /[+-]\d{2}:\d{2}$/.test(schedule_value)) {
-        res.status(400).json({ ok: false, error: `Use local time without timezone suffix. Got "${schedule_value}"` });
+      if (
+        /[Zz]$/.test(schedule_value) ||
+        /[+-]\d{2}:\d{2}$/.test(schedule_value)
+      ) {
+        res
+          .status(400)
+          .json({
+            ok: false,
+            error: `Use local time without timezone suffix. Got "${schedule_value}"`,
+          });
         return;
       }
       const date = new Date(schedule_value);
       if (isNaN(date.getTime())) {
-        res.status(400).json({ ok: false, error: `Invalid timestamp: "${schedule_value}"` });
+        res
+          .status(400)
+          .json({ ok: false, error: `Invalid timestamp: "${schedule_value}"` });
         return;
       }
       nextRun = date.toISOString();
     } else {
-      res.status(400).json({ ok: false, error: `Invalid schedule_type: "${schedule_type}"` });
+      res
+        .status(400)
+        .json({
+          ok: false,
+          error: `Invalid schedule_type: "${schedule_type}"`,
+        });
       return;
     }
 
     const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const ctxMode = context_mode === 'group' || context_mode === 'isolated' ? context_mode : 'group';
+    const ctxMode =
+      context_mode === 'group' || context_mode === 'isolated'
+        ? context_mode
+        : 'group';
 
     await createTask({
       id: taskId,
@@ -725,8 +764,10 @@ export async function createRouter(): Promise<Router> {
 
     const updates: Parameters<typeof updateTask>[1] = {};
     if (req.body.prompt !== undefined) updates.prompt = req.body.prompt;
-    if (req.body.schedule_type !== undefined) updates.schedule_type = req.body.schedule_type;
-    if (req.body.schedule_value !== undefined) updates.schedule_value = req.body.schedule_value;
+    if (req.body.schedule_type !== undefined)
+      updates.schedule_type = req.body.schedule_type;
+    if (req.body.schedule_value !== undefined)
+      updates.schedule_value = req.body.schedule_value;
     if (req.body.status !== undefined) updates.status = req.body.status;
 
     // Recompute next_run if schedule changed
@@ -734,10 +775,17 @@ export async function createRouter(): Promise<Router> {
       const merged = { ...task, ...updates };
       if (merged.schedule_type === 'cron') {
         try {
-          const interval = CronExpressionParser.parse(merged.schedule_value, { tz: TIMEZONE });
+          const interval = CronExpressionParser.parse(merged.schedule_value, {
+            tz: TIMEZONE,
+          });
           updates.next_run = interval.next().toISOString();
         } catch {
-          res.status(400).json({ ok: false, error: `Invalid cron: "${merged.schedule_value}"` });
+          res
+            .status(400)
+            .json({
+              ok: false,
+              error: `Invalid cron: "${merged.schedule_value}"`,
+            });
           return;
         }
       } else if (merged.schedule_type === 'interval') {
@@ -1060,7 +1108,9 @@ export async function createRouter(): Promise<Router> {
   // ── Note Items (checklist items) ──
 
   /** Parse markdown checkboxes into structured items */
-  function parseCheckboxes(content: string): Array<{ title: string; checked: boolean }> {
+  function parseCheckboxes(
+    content: string,
+  ): Array<{ title: string; checked: boolean }> {
     const items: Array<{ title: string; checked: boolean }> = [];
     const regex = /- \[([ x])\] (.+)/g;
     let match;
@@ -1087,31 +1137,43 @@ export async function createRouter(): Promise<Router> {
     res.json({ ok: true, data: items });
   });
 
-  router.patch('/api/notes/:noteId/items/:itemId', async (req: Request, res: Response) => {
-    const { status, due_date, remind_at, recurrence } = req.body;
-    const updates: Record<string, unknown> = {};
-    if (status !== undefined) updates.status = status;
-    if (due_date !== undefined) updates.due_date = due_date;
-    if (remind_at !== undefined) updates.remind_at = remind_at;
-    if (recurrence !== undefined) updates.recurrence = recurrence;
-    await updateNoteItem(req.params.itemId as string, updates);
-    const items = await getNoteItems(req.params.noteId as string);
-    res.json({ ok: true, data: items });
-  });
+  router.patch(
+    '/api/notes/:noteId/items/:itemId',
+    async (req: Request, res: Response) => {
+      const { status, due_date, remind_at, recurrence } = req.body;
+      const updates: Record<string, unknown> = {};
+      if (status !== undefined) updates.status = status;
+      if (due_date !== undefined) updates.due_date = due_date;
+      if (remind_at !== undefined) updates.remind_at = remind_at;
+      if (recurrence !== undefined) updates.recurrence = recurrence;
+      await updateNoteItem(req.params.itemId as string, updates);
+      const items = await getNoteItems(req.params.noteId as string);
+      res.json({ ok: true, data: items });
+    },
+  );
 
-  router.post('/api/notes/:noteId/items', async (req: Request, res: Response) => {
-    const { title } = req.body;
-    if (!title) { res.status(400).json({ ok: false, error: 'title required' }); return; }
-    await createNoteItem(req.params.noteId as string, title);
-    const items = await getNoteItems(req.params.noteId as string);
-    res.json({ ok: true, data: items });
-  });
+  router.post(
+    '/api/notes/:noteId/items',
+    async (req: Request, res: Response) => {
+      const { title } = req.body;
+      if (!title) {
+        res.status(400).json({ ok: false, error: 'title required' });
+        return;
+      }
+      await createNoteItem(req.params.noteId as string, title);
+      const items = await getNoteItems(req.params.noteId as string);
+      res.json({ ok: true, data: items });
+    },
+  );
 
-  router.delete('/api/notes/:noteId/items/:itemId', async (req: Request, res: Response) => {
-    await deleteNoteItem(req.params.itemId as string);
-    const items = await getNoteItems(req.params.noteId as string);
-    res.json({ ok: true, data: items });
-  });
+  router.delete(
+    '/api/notes/:noteId/items/:itemId',
+    async (req: Request, res: Response) => {
+      await deleteNoteItem(req.params.itemId as string);
+      const items = await getNoteItems(req.params.noteId as string);
+      res.json({ ok: true, data: items });
+    },
+  );
 
   // ── Token reminder group ──
   router.patch(
@@ -2320,7 +2382,8 @@ export async function createRouter(): Promise<Router> {
 
   // ── Analytics (Metabase embedding) ──
   const METABASE_SITE_URL = 'https://devenanalytics.fly.dev';
-  const METABASE_SECRET_KEY = '6d14d63877af35017910f77e765338a5c4703db7bd5664f8bf50f4ca0d03a2d4';
+  const METABASE_SECRET_KEY =
+    '6d14d63877af35017910f77e765338a5c4703db7bd5664f8bf50f4ca0d03a2d4';
 
   router.get('/api/analytics/embed-url', (req: Request, res: Response) => {
     const dashboardId = Number(req.query.dashboard) || 2; // Default: Rail Master Dashboard
@@ -2334,7 +2397,9 @@ export async function createRouter(): Promise<Router> {
     );
     res.json({
       ok: true,
-      data: { url: `${METABASE_SITE_URL}/embed/dashboard/${token}#bordered=false&titled=true` },
+      data: {
+        url: `${METABASE_SITE_URL}/embed/dashboard/${token}#bordered=false&titled=true`,
+      },
     });
   });
 
@@ -2354,7 +2419,9 @@ export async function createRouter(): Promise<Router> {
     );
     res.json({
       ok: true,
-      data: { url: `${METABASE_SITE_URL}/embed/question/${token}#bordered=false&titled=true` },
+      data: {
+        url: `${METABASE_SITE_URL}/embed/question/${token}#bordered=false&titled=true`,
+      },
     });
   });
 

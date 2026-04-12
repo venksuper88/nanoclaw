@@ -518,7 +518,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
       // Emit context usage — always, even without result text
       if (!result.usage) {
-        logger.warn({ group: group.name, hasResult: !!result.result, streamed: result.streamed }, 'No usage data in onOutput callback');
+        logger.warn(
+          {
+            group: group.name,
+            hasResult: !!result.result,
+            streamed: result.streamed,
+          },
+          'No usage data in onOutput callback',
+        );
       }
       if (result.usage) {
         const totalTokens =
@@ -528,7 +535,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         const contextWindowSize = result.usage.contextWindow || 200_000; // From result event, fallback 200K
         const percent = Math.round((totalTokens / contextWindowSize) * 100);
         logger.info(
-          { group: group.name, percent, totalTokens, contextWindowSize, usage: result.usage },
+          {
+            group: group.name,
+            percent,
+            totalTokens,
+            contextWindowSize,
+            usage: result.usage,
+          },
           'Context% calculation',
         );
         if (percent > 0) {

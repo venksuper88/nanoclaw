@@ -474,8 +474,13 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
         const msg = `🔔 **Note reminder:** ${item.title}\n📝 From: *${note.title}*`;
         await deps.sendMessage(targetJid, msg);
-        await updateNoteItem(item.id, { reminder_fired_at: new Date().toISOString() });
-        logger.info({ noteItemId: item.id, noteId: item.note_id }, 'Note item reminder fired');
+        await updateNoteItem(item.id, {
+          reminder_fired_at: new Date().toISOString(),
+        });
+        logger.info(
+          { noteItemId: item.id, noteId: item.note_id },
+          'Note item reminder fired',
+        );
       }
 
       // Daily todo digest — send at DIGEST_HOUR local time
