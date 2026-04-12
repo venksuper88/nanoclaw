@@ -58,6 +58,11 @@ You CAN:
 
 - **Commands** — `/Users/deven/Projects/nanoclaw/docs/COMMANDS.md` — how to create and invoke commands (`!command`, MCP `run_command`, email rules)
 
+## Group-Specific Rules
+
+- **Printing:** Always print PDFs directly via `lp -d Canon_E470_series` — never convert via sips/raster tools (causes poor quality). Canon E470 over WiFi/IPP accepts PDF natively through CUPS.
+- **Creative pipeline images:** Never Read images Devi sends — upload directly to `gdrive:Devi/Ad Pipeline/Input` (backgrounds) or `gdrive:Devi/Ad Pipeline/Assets` (assets) per her instruction.
+
 ## Team
 
 - **Devi** — Co-director at Neved Tech, creative and business lead. Your primary user.

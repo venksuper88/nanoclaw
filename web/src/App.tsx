@@ -88,6 +88,8 @@ export function App() {
   useEffect(() => {
     const onTouchStart = (e: TouchEvent) => {
       const touch = e.touches[0];
+      // Skip swipe detection on tab bar — taps there must not be captured
+      if ((e.target as HTMLElement).closest('.tab-bar')) return;
       // Wide capture zone (40px) — iOS edge swipes often start at 0
       if (touch.clientX < 40) {
         swipeRef.current = { startX: touch.clientX, startY: touch.clientY };
@@ -276,16 +278,17 @@ export function App() {
           </button>
         )}
         <button className="top-bar-refresh" onClick={async () => {
-          // Force-clear SW caches and reload to pick up new builds on iOS PWA
+          // Force-clear ALL caches and hard reload to pick up new builds on iOS PWA
           if ('serviceWorker' in navigator) {
             const regs = await navigator.serviceWorker.getRegistrations();
-            await Promise.all(regs.map(r => r.update()));
+            await Promise.all(regs.map(r => r.unregister()));
           }
           if ('caches' in window) {
             const keys = await caches.keys();
             await Promise.all(keys.map(k => caches.delete(k)));
           }
-          window.location.reload();
+          // Bust HTTP cache by navigating to a cache-busted URL
+          window.location.href = window.location.pathname + '?_=' + Date.now();
         }}>
           <span className="mi">refresh</span>
         </button>

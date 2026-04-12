@@ -15,6 +15,7 @@ import {
   Note,
   NoteAudit,
   NoteFolder,
+  NoteItem,
   RegisteredGroup,
   ScheduledTask,
   TaskRunLog,
@@ -467,18 +468,14 @@ async function createSchema(database: Client): Promise<void> {
 
   // Add folder_id column if it doesn't exist (migration)
   try {
-    await database.execute(
-      `ALTER TABLE notes ADD COLUMN folder_id TEXT`,
-    );
+    await database.execute(`ALTER TABLE notes ADD COLUMN folder_id TEXT`);
   } catch {
     /* column already exists */
   }
 
   // Add deleted_at column for soft-delete (migration)
   try {
-    await database.execute(
-      `ALTER TABLE notes ADD COLUMN deleted_at TEXT`,
-    );
+    await database.execute(`ALTER TABLE notes ADD COLUMN deleted_at TEXT`);
   } catch {
     /* column already exists */
   }
@@ -523,6 +520,26 @@ async function createSchema(database: Client): Promise<void> {
       INSERT INTO notes_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags);
     END
   `);
+
+  // Note items — first-class checklist items within notes
+  await database.execute(`
+    CREATE TABLE IF NOT EXISTS note_items (
+      id TEXT PRIMARY KEY,
+      note_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      position INTEGER NOT NULL DEFAULT 0,
+      due_date TEXT,
+      remind_at TEXT,
+      recurrence TEXT,
+      reminder_fired_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  await database.execute(
+    `CREATE INDEX IF NOT EXISTS idx_note_items_note ON note_items(note_id, position)`,
+  );
 
   // Per-group MCP server allowlist and tool disabling
   for (const col of ['allowed_mcp_servers', 'disabled_tools']) {
@@ -1081,9 +1098,7 @@ export async function getDueTodoReminders(): Promise<Todo[]> {
 
 // --- Note Folders CRUD ---
 
-export async function createNoteFolder(
-  folder: NoteFolder,
-): Promise<void> {
+export async function createNoteFolder(folder: NoteFolder): Promise<void> {
   await db.execute({
     sql: `INSERT INTO notes_folders (id, user_id, name, parent_id, icon, color, sort_order, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1122,7 +1137,9 @@ export async function getNoteFolderById(
 
 export async function updateNoteFolder(
   id: string,
-  updates: Partial<Pick<NoteFolder, 'name' | 'parent_id' | 'icon' | 'color' | 'sort_order'>>,
+  updates: Partial<
+    Pick<NoteFolder, 'name' | 'parent_id' | 'icon' | 'color' | 'sort_order'>
+  >,
 ): Promise<void> {
   const fields: string[] = [];
   const values: unknown[] = [];
@@ -1193,7 +1210,14 @@ export async function logNoteAudit(
   await db.execute({
     sql: `INSERT INTO notes_audit (id, note_id, action, actor, details, created_at)
       VALUES (?, ?, ?, ?, ?, ?)`,
-    args: [id, noteId, action, actor, details ? JSON.stringify(details) : null, new Date().toISOString()],
+    args: [
+      id,
+      noteId,
+      action,
+      actor,
+      details ? JSON.stringify(details) : null,
+      new Date().toISOString(),
+    ],
   });
 }
 
@@ -1223,7 +1247,9 @@ export async function createNote(note: Note, actor?: string): Promise<void> {
       note.updated_at,
     ],
   });
-  await logNoteAudit(note.id, 'create', actor || note.created_by, { title: note.title });
+  await logNoteAudit(note.id, 'create', actor || note.created_by, {
+    title: note.title,
+  });
 }
 
 export async function getNoteById(id: string): Promise<Note | undefined> {
@@ -1352,8 +1378,137 @@ export async function purgeNote(id: string): Promise<void> {
   await db.execute({ sql: 'DELETE FROM notes WHERE id = ?', args: [id] });
 }
 
+// ── Note Items (checklist items within notes) ──
+
+export async function getNoteItems(noteId: string): Promise<NoteItem[]> {
+  const result = await db.execute({
+    sql: 'SELECT * FROM note_items WHERE note_id = ? ORDER BY position',
+    args: [noteId],
+  });
+  return result.rows as unknown as NoteItem[];
+}
+
+export async function syncNoteItems(
+  noteId: string,
+  items: Array<{ title: string; checked: boolean }>,
+): Promise<NoteItem[]> {
+  const now = new Date().toISOString();
+  const existing = await getNoteItems(noteId);
+
+  // Match existing items by position to preserve IDs and metadata
+  const result: NoteItem[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const prev = existing[i];
+    if (prev) {
+      // Update existing item
+      const newStatus = item.checked ? 'done' : 'pending';
+      if (prev.title !== item.title || prev.status !== newStatus || prev.position !== i) {
+        await db.execute({
+          sql: 'UPDATE note_items SET title = ?, status = ?, position = ?, updated_at = ? WHERE id = ?',
+          args: [item.title, newStatus, i, now, prev.id],
+        });
+      }
+      result.push({ ...prev, title: item.title, status: newStatus as 'pending' | 'done', position: i, updated_at: now });
+    } else {
+      // Create new item
+      const id = `ni-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const newItem: NoteItem = {
+        id,
+        note_id: noteId,
+        title: item.title,
+        status: item.checked ? 'done' : 'pending',
+        position: i,
+        due_date: null,
+        remind_at: null,
+        recurrence: null,
+        reminder_fired_at: null,
+        created_at: now,
+        updated_at: now,
+      };
+      await db.execute({
+        sql: `INSERT INTO note_items (id, note_id, title, status, position, due_date, remind_at, recurrence, reminder_fired_at, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)`,
+        args: [id, noteId, newItem.title, newItem.status, i, now, now],
+      });
+      result.push(newItem);
+    }
+  }
+
+  // Delete excess items (items removed from content)
+  if (existing.length > items.length) {
+    for (let i = items.length; i < existing.length; i++) {
+      await db.execute({
+        sql: 'DELETE FROM note_items WHERE id = ?',
+        args: [existing[i].id],
+      });
+    }
+  }
+
+  return result;
+}
+
+export async function updateNoteItem(
+  id: string,
+  updates: Partial<Pick<NoteItem, 'title' | 'status' | 'due_date' | 'remind_at' | 'recurrence' | 'reminder_fired_at'>>,
+): Promise<void> {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, val] of Object.entries(updates)) {
+    fields.push(`${key} = ?`);
+    values.push(val);
+  }
+  if (fields.length === 0) return;
+  fields.push('updated_at = ?');
+  values.push(new Date().toISOString());
+  values.push(id);
+  await db.execute({
+    sql: `UPDATE note_items SET ${fields.join(', ')} WHERE id = ?`,
+    args: values as InValue[],
+  });
+}
+
+export async function createNoteItem(noteId: string, title: string): Promise<NoteItem> {
+  const now = new Date().toISOString();
+  const id = `ni-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  // Get max position
+  const maxPos = await db.execute({ sql: 'SELECT MAX(position) as mp FROM note_items WHERE note_id = ?', args: [noteId] });
+  const position = ((maxPos.rows[0] as any)?.mp ?? -1) + 1;
+  const item: NoteItem = { id, note_id: noteId, title, status: 'pending', position, due_date: null, remind_at: null, recurrence: null, reminder_fired_at: null, created_at: now, updated_at: now };
+  await db.execute({
+    sql: `INSERT INTO note_items (id, note_id, title, status, position, due_date, remind_at, recurrence, reminder_fired_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)`,
+    args: [id, noteId, title, 'pending', position, now, now],
+  });
+  return item;
+}
+
+export async function deleteNoteItem(id: string): Promise<void> {
+  await db.execute({ sql: 'DELETE FROM note_items WHERE id = ?', args: [id] });
+}
+
+export async function deleteNoteItems(noteId: string): Promise<void> {
+  await db.execute({
+    sql: 'DELETE FROM note_items WHERE note_id = ?',
+    args: [noteId],
+  });
+}
+
+export async function getDueNoteItemReminders(): Promise<NoteItem[]> {
+  const now = new Date().toISOString();
+  const result = await db.execute({
+    sql: `SELECT * FROM note_items WHERE remind_at IS NOT NULL AND remind_at <= ? AND reminder_fired_at IS NULL AND status = 'pending'`,
+    args: [now],
+  });
+  return result.rows as unknown as NoteItem[];
+}
+
 /** Ensure a folder exists for an agent group. Returns its ID. */
-export async function ensureGroupFolder(userId: string, groupFolder: string, groupName?: string): Promise<string> {
+export async function ensureGroupFolder(
+  userId: string,
+  groupFolder: string,
+  groupName?: string,
+): Promise<string> {
   const displayName = groupName || groupFolder.replace(/^dashboard_/, '');
   const existing = await db.execute({
     sql: 'SELECT id FROM notes_folders WHERE user_id = ? AND name = ? AND parent_id IS NULL',

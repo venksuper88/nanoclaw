@@ -259,7 +259,7 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
       // Skip if input is focused — user is actively typing, don't reset their cursor
       if (inputRef.current && document.activeElement === inputRef.current) return;
       setInput(d.content);
-      if (inputRef.current) (inputRef.current as any).innerText = d.content;
+      if (inputRef.current) { inputRef.current.value = d.content; inputRef.current.style.height = 'auto'; inputRef.current.style.height = inputRef.current.scrollHeight + 'px'; }
     };
     socket.on('draft:update', handler);
     return () => { socket.off('draft:update', handler); };
@@ -271,10 +271,10 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
     api.getDraft(selectedJid).then(r => {
       if (r.ok && r.data.content) {
         setInput(r.data.content);
-        if (inputRef.current) (inputRef.current as any).innerText = r.data.content;
+        if (inputRef.current) { inputRef.current.value = r.data.content; inputRef.current.style.height = 'auto'; inputRef.current.style.height = inputRef.current.scrollHeight + 'px'; }
       } else {
         setInput('');
-        if (inputRef.current) (inputRef.current as any).innerText = '';
+        if (inputRef.current) { inputRef.current.value = ''; inputRef.current.style.height = 'auto'; }
       }
     }).catch(() => {});
   }, [selectedJid]);
@@ -312,7 +312,7 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
     const prefix = cmd.prefix || '/';
     const text = `${prefix}${cmd.command} `;
     setInput(text);
-    if (inputRef.current) (inputRef.current as any).innerText = text;
+    if (inputRef.current) { inputRef.current.value = text; inputRef.current.style.height = 'auto'; inputRef.current.style.height = inputRef.current.scrollHeight + 'px'; }
     setShowCommands(false);
     inputRef.current?.focus();
   };
@@ -341,7 +341,7 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
     if (draftTimer.current) { clearTimeout(draftTimer.current); draftTimer.current = null; }
     setInput('');
     setStagedFiles([]);
-    if (inputRef.current) (inputRef.current as any).innerText = '';
+    if (inputRef.current) { inputRef.current.value = ''; inputRef.current.style.height = 'auto'; }
     if (selectedJid) api.setDraft(selectedJid, '').catch(() => {});
 
     setSending(true);
@@ -372,12 +372,12 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
     try { await api.sendChat(selectedJid, msgText, stateless || undefined); } catch {}
     setSending(false);
     if (stateless) setStateless(false); // Reset toggle after sending
-    (inputRef.current as any)?.focus();
+    inputRef.current?.focus();
   };
 
   const stageFile = (newFiles: File[]) => {
     setStagedFiles(prev => [...prev, ...newFiles]);
-    (inputRef.current as any)?.focus();
+    inputRef.current?.focus();
   };
 
   const upload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -624,25 +624,21 @@ export function ChatView({ groups, selectedJid, selectedGroup, processingFolders
         >
           <span className="mi" style={{ fontSize: 20 }}>bolt</span>
         </button>
-        <div
-          ref={inputRef as any}
+        <textarea
+          ref={inputRef}
           className="chat-editable"
-          contentEditable={!sending}
-          role="textbox"
-          data-placeholder="Type a message..."
-          onInput={e => {
-            const text = (e.target as HTMLDivElement).innerText;
-            onInputChange(text);
+          placeholder="Type a message..."
+          disabled={sending}
+          rows={1}
+          value={input}
+          onChange={e => {
+            onInputChange(e.target.value);
+            e.target.style.height = 'auto';
+            e.target.style.height = e.target.scrollHeight + 'px';
           }}
           onKeyDown={e => {
             onInputKeyDown(e);
           }}
-          onPaste={e => {
-            e.preventDefault();
-            const text = e.clipboardData.getData('text/plain');
-            document.execCommand('insertText', false, text);
-          }}
-          suppressContentEditableWarning
         />
         <button type="button" className={`send-btn ${(input.trim() || stagedFiles.length) ? 'ready' : 'idle'}`} onClick={send} disabled={sending || (!input.trim() && !stagedFiles.length)}>
           <span className="mi" style={{ fontSize: 20 }}>send</span>

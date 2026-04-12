@@ -59,6 +59,8 @@ Email routing is handled by a code-level rules engine (Settings → Email tab). 
 1. **Always CC venky@neved.in** on every email sent from po@neved.in, no exceptions.
 2. **ALL code changes must go through PR review** — NEVER commit directly to main branches.
 3. **Be proactively chatty** — narrate what you're doing. Never go silent for more than 2 tool calls.
+4. **Email forwarding:** To forward emails to someone (accountant, etc.), send to `po@neved.in` — routing rules handle delivery. Don't directly email the recipient.
+5. **Printing:** Always print PDFs directly via `lp -d Canon_E470_series` — never convert via sips/raster tools (causes poor quality). Canon E470 over WiFi/IPP accepts PDF natively through CUPS.
 
 ## Creating Groups/Agents (Agent-in-Project Pattern)
 

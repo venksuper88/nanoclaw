@@ -50,7 +50,10 @@ export async function startDashboard(
 <span class="material-symbols-outlined" style="font-size:22px">arrow_back</span>Mission Control</a></div>
 <style>#mc-back~#root,#mc-back~div{padding-top:52px!important}</style>`;
   const serveSubAppIndex = (indexPath: string, res: express.Response) => {
-    if (!fs.existsSync(indexPath)) { res.status(404).send('App not found'); return; }
+    if (!fs.existsSync(indexPath)) {
+      res.status(404).send('App not found');
+      return;
+    }
     let html = fs.readFileSync(indexPath, 'utf-8');
     html = html.replace('</body>', backButtonSnippet + '</body>');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -61,7 +64,9 @@ export async function startDashboard(
   // Finance sub-app static files
   const FINANCE_DIR = path.join(process.cwd(), 'public', 'finance');
   // Serve index.html with back button injected
-  app.get('/finance/', (_req, res) => serveSubAppIndex(path.join(FINANCE_DIR, 'index.html'), res));
+  app.get('/finance/', (_req, res) =>
+    serveSubAppIndex(path.join(FINANCE_DIR, 'index.html'), res),
+  );
   app.get('/finance', (_req, res) => res.redirect('/finance/'));
   app.use(
     '/finance',
@@ -81,7 +86,9 @@ export async function startDashboard(
 
   // Creatives sub-app static files
   const CREATIVES_DIR = path.join(process.cwd(), 'public', 'creatives');
-  app.get('/creatives/', (_req, res) => serveSubAppIndex(path.join(CREATIVES_DIR, 'index.html'), res));
+  app.get('/creatives/', (_req, res) =>
+    serveSubAppIndex(path.join(CREATIVES_DIR, 'index.html'), res),
+  );
   app.get('/creatives', (_req, res) => res.redirect('/creatives/'));
   app.use(
     '/creatives',
@@ -134,7 +141,9 @@ export async function startDashboard(
 
   // Analytics (Metabase) sub-app
   const ANALYTICS_DIR = path.join(process.cwd(), 'public', 'analytics');
-  app.get('/analytics/', (_req, res) => serveSubAppIndex(path.join(ANALYTICS_DIR, 'index.html'), res));
+  app.get('/analytics/', (_req, res) =>
+    serveSubAppIndex(path.join(ANALYTICS_DIR, 'index.html'), res),
+  );
   app.get('/analytics', (_req, res) => res.redirect('/analytics/'));
   app.use(
     '/analytics',

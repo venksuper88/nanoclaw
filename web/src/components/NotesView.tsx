@@ -1,8 +1,12 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
-import TurndownService from 'turndown';
+import { Markdown } from '@tiptap/markdown';
+import { Table } from '@tiptap/extension-table';
+import { TableRow } from '@tiptap/extension-table-row';
+import { TableCell } from '@tiptap/extension-table-cell';
+import { TableHeader } from '@tiptap/extension-table-header';
 import { marked } from 'marked';
 import { api } from '../api';
 
@@ -37,33 +41,121 @@ function fmtRelativeDate(iso: string): string {
   return new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-/** Extract #hashtags from text, return unique tag list */
+/** Count checkboxes in markdown content */
+function countChecks(md: string): { total: number; done: number } | null {
+  const all = md.match(/- \[[ x]\] /g);
+  if (!all || all.length === 0) return null;
+  const done = md.match(/- \[x\] /g)?.length || 0;
+  return { total: all.length, done };
+}
+
+/** Extract #hashtags from text, filtering out pure numbers like #23 */
 function extractTags(text: string): string[] {
   const matches = text.match(/(?:^|\s)#(\w+)/g) || [];
-  const tags = matches.map(m => m.trim().slice(1));
+  const tags = matches.map(m => m.trim().slice(1)).filter(t => !/^\d+$/.test(t));
   return [...new Set(tags)];
 }
 
-// Singleton turndown instance for HTML→Markdown
-const turndown = new TurndownService({
-  headingStyle: 'atx',
-  codeBlockStyle: 'fenced',
-  bulletListMarker: '-',
-});
-
-/** Convert markdown to HTML for TipTap */
-function mdToHtml(md: string): string {
+/** Convert markdown to HTML for reading */
+function mdToReadHtml(md: string): string {
   if (!md) return '';
-  return marked.parse(md, { async: false }) as string;
+  // Strip markdown checkbox lines — they're handled by NoteChecklist component
+  let cleaned = md.replace(/^(\s*)-\s+\[[ x]\]\s+.+$/gm, '').trim();
+  // Fix tables: TipTap serializer inserts blank lines between table rows which breaks marked parsing
+  while (cleaned.includes('|\n\n|')) cleaned = cleaned.replace(/(\|[^\n]+\|)\n\n(\|)/g, '$1\n$2');
+  // Unescape <br> inside table cells (TipTap escapes HTML entities)
+  cleaned = cleaned.replace(/&lt;br&gt;/g, '<br>');
+  return marked.parse(cleaned, { async: false }) as string;
 }
 
-/** Convert TipTap HTML back to markdown */
-function htmlToMd(html: string): string {
-  if (!html) return '';
-  return turndown.turndown(html);
+interface NoteItemType {
+  id: string;
+  note_id: string;
+  title: string;
+  status: string;
+  position: number;
 }
 
-/** TipTap editor wrapper component */
+/** Checklist component — renders note items as toggleable checkboxes */
+function NoteChecklist({ noteId, editable }: { noteId: string; editable?: boolean }) {
+  const [items, setItems] = useState<NoteItemType[]>([]);
+  const [newItemText, setNewItemText] = useState('');
+
+  useEffect(() => {
+    api.getNoteItems(noteId).then(r => { if (r.ok) setItems(r.data); });
+  }, [noteId]);
+
+  const toggleItem = async (item: NoteItemType) => {
+    const newStatus = item.status === 'done' ? 'pending' : 'done';
+    // Optimistic update
+    setItems(prev => prev.map(i => i.id === item.id ? { ...i, status: newStatus } : i));
+    const r = await api.updateNoteItem(noteId, item.id, { status: newStatus });
+    if (r.ok) setItems(r.data);
+  };
+
+  const addItem = async () => {
+    const title = newItemText.trim();
+    if (!title) return;
+    setNewItemText('');
+    const r = await api.createNoteItem(noteId, title);
+    if (r.ok) setItems(r.data);
+  };
+
+  const removeItem = async (itemId: string) => {
+    setItems(prev => prev.filter(i => i.id !== itemId));
+    const r = await api.deleteNoteItem(noteId, itemId);
+    if (r.ok) setItems(r.data);
+  };
+
+  if (items.length === 0 && !editable) return null;
+
+  const done = items.filter(i => i.status === 'done').length;
+
+  return (
+    <div className="dc-note-checklist">
+      {items.length > 0 && (
+        <div className="dc-checklist-header">
+          <span className="mi" style={{ fontSize: 16 }}>checklist</span>
+          <span>{done}/{items.length}</span>
+          {items.length > 0 && <div className="dc-checklist-bar"><div className="dc-checklist-fill" style={{ width: `${(done / items.length) * 100}%` }} /></div>}
+        </div>
+      )}
+      <ul className="dc-checklist-items">
+        {items.map(item => (
+          <li key={item.id} className={`dc-checklist-item ${item.status === 'done' ? 'done' : ''}`}>
+            <button className="dc-check-btn" onClick={() => toggleItem(item)}>
+              <span className={`dc-check-icon ${item.status === 'done' ? 'checked' : ''}`}>
+                {item.status === 'done' ? '✓' : ''}
+              </span>
+            </button>
+            <span className="dc-check-text">{item.title}</span>
+            {editable && (
+              <button className="dc-check-delete" onClick={() => removeItem(item.id)}>
+                <span className="mi" style={{ fontSize: 16 }}>close</span>
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {editable && (
+        <div className="dc-checklist-add">
+          <input
+            className="dc-checklist-input"
+            placeholder="Add item..."
+            value={newItemText}
+            onChange={e => setNewItemText(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && addItem()}
+          />
+          <button className="dc-check-add-btn" onClick={addItem} disabled={!newItemText.trim()}>
+            <span className="mi" style={{ fontSize: 18 }}>add</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** TipTap editor — text, tables, formatting. No task lists. */
 function NoteEditor({
   initialContent,
   onContentChange,
@@ -73,21 +165,22 @@ function NoteEditor({
 }) {
   const editor = useEditor({
     extensions: [
-      StarterKit.configure({
-        heading: { levels: [1, 2, 3] },
-      }),
-      Placeholder.configure({
-        placeholder: 'Start writing... use #tags inline',
-      }),
+      StarterKit.configure({ heading: { levels: [1, 2, 3] } }),
+      Table.configure({ resizable: false, HTMLAttributes: { class: 'dc-table' } }),
+      TableRow,
+      TableCell,
+      TableHeader,
+      Markdown,
+      Placeholder.configure({ placeholder: 'Start writing...' }),
     ],
-    content: mdToHtml(initialContent),
+    content: initialContent,
+    contentType: 'markdown',
     onUpdate: ({ editor }) => {
-      onContentChange(htmlToMd(editor.getHTML()));
+      const md = editor.storage.markdown.manager.serialize(editor.getJSON());
+      onContentChange(md);
     },
     editorProps: {
-      attributes: {
-        class: 'dc-tiptap-editor',
-      },
+      attributes: { class: 'dc-tiptap-editor' },
     },
   });
 
@@ -113,8 +206,11 @@ export function NotesView() {
   const [editorTitle, setEditorTitle] = useState('');
   const [editorContent, setEditorContent] = useState('');
   const [folderId, setFolderId] = useState<string | null>(null);
-  // Key to force re-mount of TipTap editor when opening different notes
+  // Key to force re-mount editor when opening different notes
   const [editorKey, setEditorKey] = useState(0);
+
+  // No browser history manipulation — just React state for sub-view nav.
+  // history.back() on iOS PWA causes async freezes that swallow touch events.
 
   // Toggle body class for full-screen editing (hides tab bar)
   useEffect(() => {
@@ -183,41 +279,52 @@ export function NotesView() {
   };
 
   const closeEditor = () => {
+    // Blur any focused element to prevent iOS focus-steal on next tap
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     setShowEditor(false);
     setEditingNote(null);
+    loadNotes(search || undefined, activeFolder);
   };
 
   const handleContentChange = useCallback((md: string) => {
     setEditorContent(md);
   }, []);
 
-  const saveNote = async () => {
+  // Auto-save: debounce 800ms on title/content/folder changes
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!showEditor) return;
     const title = editorTitle.trim();
-    if (!title) return;
+    if (!title) return; // don't save untitled
 
-    const content = editorContent;
-    const tags = extractTags(title + '\n' + content);
-    const tagsStr = tags.length > 0 ? tags.join(',') : null;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(async () => {
+      const tags = extractTags(editorTitle + '\n' + editorContent);
+      const tagsStr = tags.length > 0 ? tags.join(',') : null;
+      try {
+        if (editingNote) {
+          await api.updateNote(editingNote.id, {
+            title,
+            content: editorContent,
+            tags: tagsStr,
+            folder_id: folderId,
+          });
+        } else {
+          const res = await api.createNote({
+            title,
+            content: editorContent,
+            tags: tagsStr || undefined,
+            folder_id: folderId || undefined,
+          });
+          // Switch to editing mode so subsequent saves are updates
+          if (res.ok && res.data) setEditingNote(res.data);
+        }
+      } catch { /* ignore */ }
+    }, 800);
 
-    if (editingNote) {
-      await api.updateNote(editingNote.id, {
-        title,
-        content,
-        tags: tagsStr,
-        folder_id: folderId,
-      });
-    } else {
-      await api.createNote({
-        title,
-        content,
-        tags: tagsStr || undefined,
-        folder_id: folderId || undefined,
-      });
-    }
-    closeEditor();
-    setSelectedNote(null);
-    loadNotes(search || undefined, activeFolder);
-  };
+    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
+  }, [showEditor, editorTitle, editorContent, folderId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const removeNote = async (id: string) => {
     await api.deleteNote(id);
@@ -298,7 +405,7 @@ export function NotesView() {
     return (
       <div className="dc-view dc-view-read">
         <div className="dc-header">
-          <button className="dc-back-btn" onClick={backToList}>
+          <button className="dc-back-btn dc-header-back" onClick={backToList}>
             <span className="mi">arrow_back</span>
           </button>
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -323,21 +430,22 @@ export function NotesView() {
           </div>
         )}
         <div className="dc-content-view">
-          <div className="dc-rendered" dangerouslySetInnerHTML={{ __html: mdToHtml(selectedNote.content || '*No content*') }} />
+          <NoteChecklist noteId={selectedNote.id} />
+          <div className="dc-rendered" dangerouslySetInnerHTML={{ __html: mdToReadHtml(selectedNote.content || '*No content*') }} />
         </div>
       </div>
     );
   }
 
-  // ── Full-screen editor (Bear style with TipTap) ──
+  // ── Full-screen editor ──
   if (showEditor) {
     const liveTags = extractTags(editorTitle + '\n' + editorContent);
     return (
       <div className="dc-view dc-editor-fullscreen">
-        {/* Minimal toolbar */}
+        {/* Toolbar — back auto-saves */}
         <div className="dc-editor-toolbar">
-          <button className="dc-back-btn" onClick={closeEditor}>
-            <span className="mi">close</span>
+          <button className="dc-back-btn dc-header-back" onClick={closeEditor}>
+            <span className="mi">arrow_back</span>
           </button>
           <select
             className="dc-editor-folder-pick"
@@ -351,16 +459,14 @@ export function NotesView() {
               </option>
             ))}
           </select>
-          <button
-            className="dc-editor-save"
-            onClick={saveNote}
-            disabled={!editorTitle.trim()}
-          >
-            Save
-          </button>
+          {editingNote && (
+            <button className="dc-refresh" onClick={(e) => copyNoteLink(editingNote.id, e)} title="Copy note link">
+              <span className="mi" style={{ fontSize: 20 }}>{linkCopied ? 'check' : 'link'}</span>
+            </button>
+          )}
         </div>
 
-        {/* Title + TipTap content */}
+        {/* Title + TipTap content + Checklist */}
         <div className="dc-editor-seamless">
           <input
             className="dc-editor-heading"
@@ -371,9 +477,8 @@ export function NotesView() {
             onKeyDown={e => {
               if (e.key === 'Enter') {
                 e.preventDefault();
-                // Focus the TipTap editor
-                const tiptap = (e.target as HTMLElement).parentElement?.querySelector('.ProseMirror') as HTMLElement;
-                if (tiptap) tiptap.focus();
+                const pm = (e.target as HTMLElement).parentElement?.querySelector('.ProseMirror') as HTMLElement;
+                if (pm) pm.focus();
               }
             }}
           />
@@ -382,6 +487,7 @@ export function NotesView() {
             initialContent={editorContent}
             onContentChange={handleContentChange}
           />
+          {editingNote && <NoteChecklist noteId={editingNote.id} editable />}
         </div>
 
         {/* Live tag preview */}
@@ -548,6 +654,16 @@ export function NotesView() {
                 </div>
                 <div className="dc-card-meta">
                   <span>{fmtRelativeDate(note.updated_at)}</span>
+                  {(() => {
+                    const checks = note.content ? countChecks(note.content) : null;
+                    if (!checks) return null;
+                    return (
+                      <span className={`dc-check-count ${checks.done === checks.total ? 'done' : ''}`}>
+                        <span className="mi" style={{ fontSize: 14 }}>checklist</span>
+                        {checks.done}/{checks.total}
+                      </span>
+                    );
+                  })()}
                   {!activeFolder && note.folder_id && (
                     <span className="dc-tag-sm">{getFolderName(note.folder_id)}</span>
                   )}

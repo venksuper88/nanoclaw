@@ -143,6 +143,20 @@ export interface Note {
   deleted_at: string | null; // soft-delete timestamp
 }
 
+export interface NoteItem {
+  id: string;
+  note_id: string;
+  title: string;
+  status: 'pending' | 'done';
+  position: number;
+  due_date: string | null;
+  remind_at: string | null;
+  recurrence: string | null;
+  reminder_fired_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface NoteAudit {
   id: string;
   note_id: string;

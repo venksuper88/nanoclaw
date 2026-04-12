@@ -8,7 +8,11 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Material+Symbols+Outlined:opsz,wght,FILL@20..48,100..700,0..1&display=swap" rel="stylesheet">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { height: 100%; overflow: hidden; font-family: Inter, -apple-system, system-ui, sans-serif; }
+    html, body { height: 100%; overflow: hidden; font-family: Inter, -apple-system, system-ui, sans-serif; background: #f8f8f8; }
+    .loading {
+      display: flex; align-items: center; justify-content: center;
+      height: 100%; color: #666; font-size: 15px;
+    }
     .metabase-frame {
       width: 100%;
       height: 100%;
@@ -18,11 +22,30 @@
   </style>
 </head>
 <body>
-  <iframe
-    class="metabase-frame"
-    src="https://devenanalytics.fly.dev"
-    allow="fullscreen"
-    loading="eager"
-  ></iframe>
+  <div class="loading" id="loading">Loading dashboard...</div>
+  <iframe id="frame" class="metabase-frame" style="display:none" allow="fullscreen"></iframe>
+  <script>
+    (async () => {
+      const params = new URLSearchParams(window.location.search);
+      const dashboard = params.get('dashboard') || '2';
+      const token = localStorage.getItem('mc_token') || new URLSearchParams(window.location.search).get('token') || '';
+      try {
+        const res = await fetch(`/api/analytics/embed-url?dashboard=${dashboard}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        const json = await res.json();
+        if (json.ok) {
+          const frame = document.getElementById('frame');
+          frame.src = json.data.url;
+          frame.style.display = 'block';
+          document.getElementById('loading').style.display = 'none';
+        } else {
+          document.getElementById('loading').textContent = 'Failed to load: ' + (json.error || 'unauthorized');
+        }
+      } catch (e) {
+        document.getElementById('loading').textContent = 'Failed to connect';
+      }
+    })();
+  </script>
 </body>
 </html>

@@ -97,7 +97,6 @@ body {
   overflow: hidden;
   max-width: 100vw;
   /* JS overrides height via visualViewport when keyboard opens */
-  will-change: height, transform;
 }
 
 .mi {
@@ -228,6 +227,7 @@ body {
   cursor: pointer;
   border-radius: 9999px;
   -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
   transition: all 0.2s;
 }
 
@@ -294,7 +294,7 @@ body {
 /* Swipe edge zone — invisible touch target on left edge, below top bar */
 .swipe-edge {
   position: fixed;
-  top: 52px; left: 0; bottom: 0;
+  top: 52px; left: 0; bottom: calc(58px + var(--safe-b));
   width: 40px;
   z-index: 199;
   touch-action: pan-x;
@@ -484,7 +484,7 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 0 16px 16px;
-  -webkit-overflow-scrolling: touch;
+
 }
 
 .message {
@@ -789,7 +789,7 @@ body {
 
 .message-bubble .code-scroll {
   overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
+
   width: 100%;
   max-width: 100%;
   min-width: 0;
@@ -969,16 +969,14 @@ body {
   outline: none;
   max-height: 100px;
   overflow-y: auto;
-  word-break: break-word;
-  white-space: pre-wrap;
-  -webkit-user-select: text;
-  user-select: text;
+  border: none;
+  background: transparent;
+  resize: none;
+  -webkit-appearance: none;
 }
 
-.chat-editable:empty::before {
-  content: attr(data-placeholder);
+.chat-editable::placeholder {
   color: var(--text3);
-  pointer-events: none;
 }
 
 .send-btn, .attach-btn {
@@ -1347,7 +1345,7 @@ select {
 .overview-view {
   flex: 1;
   overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+
   padding-bottom: 20px;
 }
 
@@ -1631,7 +1629,7 @@ select {
 .tasks-view {
   flex: 1;
   overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+
   padding-bottom: 20px;
 }
 
@@ -1669,18 +1667,56 @@ select {
 
 .task-card {
   background: var(--surface);
-  border-radius: 16px;
-  padding: 16px;
+  border-radius: 12px;
   border: 1px solid var(--separator);
+  overflow: hidden;
 }
 
 .task-card.paused { opacity: 0.6; }
+.task-card.completed { opacity: 0.5; }
 
-.task-card-header {
+.task-card-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.task-card-row:active {
+  background: var(--surface-alt);
+}
+
+.task-card-title-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.task-title {
+  font-family: 'Inter', sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-subtitle {
+  font-size: 11px;
+  color: var(--text3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-expand-icon {
+  color: var(--text3);
+  flex-shrink: 0;
 }
 
 .task-status-dot {
@@ -1692,31 +1728,27 @@ select {
 .task-status-dot.active { background: var(--green); }
 .task-status-dot.paused { background: var(--orange); }
 .task-status-dot.error { background: var(--error); }
+.task-status-dot.completed { background: var(--text3); }
 
-.task-group {
-  font-family: 'Manrope', sans-serif;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.task-schedule {
-  font-size: 11px;
-  color: var(--text2);
-  margin-left: auto;
+.task-expanded {
+  padding: 0 14px 12px;
+  border-top: 1px solid var(--separator);
 }
 
 .task-prompt {
-  font-size: 13px;
-  color: var(--text);
-  line-height: 1.4;
-  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text2);
+  line-height: 1.5;
+  margin: 10px 0 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .task-meta {
   display: flex;
   gap: 16px;
   font-size: 11px;
-  color: var(--text2);
+  color: var(--text3);
 }
 
 .task-result {
@@ -1821,7 +1853,7 @@ select {
 .td-view {
   flex: 1;
   overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+
   padding-bottom: 100px;
   position: relative;
 }
@@ -2011,7 +2043,7 @@ select {
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+
   flex: 1;
   min-height: 0;
 }
@@ -2151,7 +2183,7 @@ select {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  -webkit-overflow-scrolling: touch;
+
   padding-bottom: 60px;
   position: relative;
   min-height: 0;
@@ -2176,6 +2208,13 @@ select {
   color: var(--text3);
   margin-top: 2px;
 }
+.dc-header-back {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  position: relative;
+  z-index: 200;
+}
 .dc-back-btn, .dc-refresh {
   border: none;
   background: none;
@@ -2191,6 +2230,9 @@ select {
   align-items: center;
   justify-content: center;
   position: relative;
+}
+.dc-back-btn .mi, .dc-refresh .mi {
+  pointer-events: none;
   z-index: 5;
 }
 .dc-search-wrap {
@@ -2285,10 +2327,13 @@ select {
 .dc-card-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px 8px;
   margin-top: 6px;
   font-size: 11px;
   color: var(--text3);
+  flex-wrap: wrap;
+  overflow: hidden;
+  max-height: 3.2em;
 }
 .dc-card-tags {
   display: flex;
@@ -2333,7 +2378,7 @@ select {
   padding: 8px 16px 16px;
   overflow-y: auto;
   overflow-x: hidden;
-  -webkit-overflow-scrolling: touch;
+
   min-height: 0;
 }
 /* Reading view: flex layout for sticky header + scrollable content */
@@ -2391,13 +2436,115 @@ select {
 .dc-rendered blockquote { border-left: 3px solid var(--purple); margin: 8px 0; padding: 4px 12px; color: var(--text2); }
 .dc-rendered hr { border: none; border-top: 1px solid var(--separator); margin: 16px 0; }
 .dc-rendered s { text-decoration: line-through; color: var(--text3); }
-.dc-rendered table { border-collapse: collapse; width: 100%; font-size: 13px; display: block; overflow-x: auto; }
+.dc-rendered table { border-collapse: collapse; width: 100%; font-size: 13px; overflow-x: auto; }
 .dc-rendered th, .dc-rendered td { border: 1px solid var(--separator); padding: 6px 10px; text-align: left; }
 .dc-rendered th { background: var(--bg); font-weight: 600; }
+
+/* Note Checklist — separate from markdown, uses note_items DB */
+.dc-note-checklist { padding: 0 16px 12px; }
+.dc-checklist-header {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--text2); margin-bottom: 8px;
+}
+.dc-checklist-bar {
+  flex: 1; height: 4px; background: var(--separator); border-radius: 2px; overflow: hidden;
+}
+.dc-checklist-fill {
+  height: 100%; background: var(--purple); border-radius: 2px; transition: width 0.3s ease;
+}
+.dc-checklist-items { list-style: none; padding: 0; margin: 0; }
+.dc-checklist-item {
+  display: flex; align-items: center; gap: 8px; padding: 6px 0;
+  border-bottom: 1px solid var(--separator);
+}
+.dc-checklist-item:last-child { border-bottom: none; }
+.dc-checklist-item.done .dc-check-text { text-decoration: line-through; color: var(--text3); }
+.dc-check-btn {
+  border: none; background: none; padding: 0; cursor: pointer;
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+  min-width: 32px; min-height: 32px; display: flex; align-items: center; justify-content: center;
+}
+.dc-check-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border: 2px solid #999; border-radius: 4px;
+  font-size: 14px; font-weight: 700; color: transparent; transition: all 0.15s ease;
+}
+.dc-check-icon.checked {
+  background: var(--purple); border-color: var(--purple); color: #fff;
+}
+.dc-check-text { flex: 1; font-size: 15px; line-height: 1.4; }
+.dc-check-delete {
+  border: none; background: none; padding: 4px; cursor: pointer; color: var(--text3);
+  opacity: 0.5; -webkit-tap-highlight-color: transparent;
+}
+.dc-check-delete:hover { opacity: 1; }
+.dc-checklist-add {
+  display: flex; align-items: center; gap: 8px; margin-top: 8px;
+}
+.dc-checklist-input {
+  flex: 1; border: none; border-bottom: 1px solid var(--separator);
+  background: none; padding: 8px 0; font-size: 14px; color: var(--text);
+  font-family: 'Inter', sans-serif; outline: none;
+}
+.dc-checklist-input:focus { border-color: var(--purple); }
+.dc-check-add-btn {
+  border: none; background: none; padding: 4px; cursor: pointer; color: var(--purple);
+  -webkit-tap-highlight-color: transparent;
+}
+.dc-check-add-btn:disabled { color: var(--text3); }
+
+/* Task list in TipTap editor — inline span keeps checkbox + text on same line */
+.dc-tiptap-editor ul[data-type="taskList"] { list-style: none; padding-left: 0; margin: 4px 0; }
+.dc-tiptap-editor li[data-type="taskItem"] {
+  display: flex;
+  align-items: flex-start;
+  margin: 2px 0;
+}
+.dc-tiptap-editor li[data-type="taskItem"] > .task-check-wrap {
+  user-select: none; margin-right: 6px; flex-shrink: 0; line-height: 1.5; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.task-check-box {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border: 2px solid #999; border-radius: 3px;
+  font-size: 13px; font-weight: 700; color: transparent; vertical-align: middle;
+  transition: all 0.15s ease;
+}
+.task-check-box.is-checked {
+  background: var(--purple); border-color: var(--purple); color: #fff;
+}
+.dc-tiptap-editor li[data-type="taskItem"] > span { flex: 1; min-width: 0; }
+.dc-tiptap-editor li[data-type="taskItem"] > span > p { display: inline; margin: 0; }
+.dc-tiptap-editor li[data-type="taskItem"][data-checked="true"] > span {
+  text-decoration: line-through; color: var(--text3);
+}
+
+/* Checklist completion counter on note cards */
+.dc-check-count {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 12px; color: var(--text3); font-weight: 500;
+}
+.dc-check-count.done { color: var(--green, #22c55e); }
+
+/* WYSIWYG table editing in TipTap editor */
+.dc-tiptap-editor table,
+.dc-tiptap-editor .dc-table { border-collapse: collapse; width: 100%; margin: 8px 0; table-layout: fixed; }
+.dc-tiptap-editor th,
+.dc-tiptap-editor td {
+  border: 1px solid var(--separator, #e0e0e0); padding: 6px 10px;
+  text-align: left; font-size: 14px; min-width: 60px; vertical-align: top;
+  position: relative;
+}
+.dc-tiptap-editor th { background: var(--bg, #f8f8f8); font-weight: 600; }
+.dc-tiptap-editor td p,
+.dc-tiptap-editor th p { margin: 0; }
+/* Selected cell highlight */
+.dc-tiptap-editor .selectedCell { background: rgba(108, 60, 225, 0.08); }
 
 /* Editor — Craft Docs style full-screen */
 body.notes-editing .tab-bar { display: none !important; }
 body.notes-editing main { padding-bottom: 0 !important; }
+.dc-editor-fullscreen.dc-view { padding-bottom: 0; overflow: hidden; }
 
 .dc-editor-fullscreen {
   flex: 1;
@@ -2450,7 +2597,7 @@ body.notes-editing main { padding-bottom: 0 !important; }
   flex-direction: column;
   min-height: 0;
   overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+
 }
 .dc-editor-heading {
   padding: 16px 16px 4px;
@@ -2466,13 +2613,40 @@ body.notes-editing main { padding-bottom: 0 !important; }
 }
 .dc-editor-heading::placeholder { color: var(--text3); font-weight: 700; }
 
-/* TipTap Bear-style editor */
+/* CodeMirror markdown editor */
+.dc-cm-wrap { flex: 1; overflow-y: auto; }
+.dc-cm-wrap .cm-editor { height: 100%; font-family: 'Inter', sans-serif; font-size: 15px; line-height: 1.6; }
+.dc-cm-wrap .cm-editor.cm-focused { outline: none; }
+.dc-cm-wrap .cm-scroller { overflow: auto; padding: 0 16px 60px; }
+.dc-cm-wrap .cm-content { min-height: 200px; }
+.dc-cm-wrap .cm-line { padding: 1px 0; }
+.dc-cm-wrap .cm-cursor { border-left-color: var(--purple); }
+.dc-cm-wrap .cm-selectionBackground { background: rgba(108,60,225,0.15) !important; }
+
+/* Checkbox widgets */
+.cm-task-checkbox {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border: 2px solid #999; border-radius: 3px;
+  font-size: 13px; font-weight: 700; color: transparent;
+  vertical-align: middle; margin-right: 4px; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: all 0.15s ease;
+}
+.cm-task-checkbox.is-checked {
+  background: var(--purple); border-color: var(--purple); color: #fff;
+}
+
+/* TipTap Bear-style editor (legacy) */
 .dc-editor-seamless .tiptap {
   flex: 1;
-  padding: 8px 16px 32px;
+  padding: 8px 16px 120px;
   outline: none;
   font-family: 'Inter', sans-serif;
   font-size: 15px;
+  -webkit-user-select: text;
+  user-select: text;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
   line-height: 1.7;
   color: var(--text);
   -webkit-user-select: text;
@@ -2552,6 +2726,15 @@ body.notes-editing main { padding-bottom: 0 !important; }
 }
 .dc-editor-seamless .tiptap li { margin: 2px 0; }
 .dc-editor-seamless .tiptap li p { margin: 0; }
+/* Task list overrides — must come after general ul/li rules to win on specificity */
+.dc-editor-seamless .tiptap ul[data-type="taskList"] { list-style: none; padding-left: 0; }
+.dc-editor-seamless .tiptap li[data-type="taskItem"] {
+  display: flex; align-items: flex-start;
+}
+.dc-editor-seamless .tiptap li[data-type="taskItem"] > .task-check-wrap { user-select: none; margin-right: 6px; flex-shrink: 0; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.dc-editor-seamless .tiptap li[data-type="taskItem"] > span { flex: 1; min-width: 0; }
+.dc-editor-seamless .tiptap li[data-type="taskItem"] > span > p { display: inline; margin: 0; }
+.dc-editor-seamless .tiptap li[data-type="taskItem"][data-checked="true"] > span { text-decoration: line-through; color: var(--text3); }
 
 /* Blockquote */
 .dc-editor-seamless .tiptap blockquote {
@@ -2633,7 +2816,7 @@ body.notes-editing main { padding-bottom: 0 !important; }
   gap: 6px;
   padding: 0 16px 8px;
   overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
+
   scrollbar-width: none;
 }
 .dc-folder-chips::-webkit-scrollbar { display: none; }
@@ -2910,7 +3093,7 @@ body.notes-editing main { padding-bottom: 0 !important; }
 .skills-view {
   flex: 1;
   overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+
   padding-bottom: 20px;
 }
 

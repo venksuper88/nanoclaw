@@ -158,3 +158,5 @@ Use standard Markdown formatting.
 3. **Verify before uploading** — run `npx tsc --noEmit` equivalent (python3 script.py) to confirm no errors.
 4. **After updating P&L:** run build_pl.py, upload via rclone, share Drive link.
 5. **All code changes go through PR** — never commit directly to main.
+6. **Email forwarding:** To forward receipts/emails, send to `po@neved.in` — routing rules handle delivery.
+7. **Google Play IAP discount:** Actual bank receipts ≈ Tenjin Android IAP × ~0.90 (10% haircut: ~5% customer refunds + Brazil WHT + FX). Use for cash flow forecasting, not P&L accrual.

@@ -1,0 +1,9 @@
+{
+  "name": "token-overhead",
+  "description": "Show token overhead for a group's agent session startup",
+  "runtime": "node",
+  "entry": "run.mjs",
+  "args": [
+    { "name": "group", "description": "Group folder name (defaults to current group)", "required": false }
+  ]
+}

@@ -13,7 +13,9 @@ import {
   getAllDashboardTokens,
   getAllTasks,
   getDueTasks,
+  getDueNoteItemReminders,
   getDueTodoReminders,
+  getNoteById,
   getTaskById,
   getTodosByUser,
   getRouterState,
@@ -22,6 +24,7 @@ import {
   storeMessage,
   updateTask,
   updateTaskAfterRun,
+  updateNoteItem,
   updateTodo,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
@@ -438,6 +441,41 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           { todoId: todo.id, userId: todo.user_id },
           'Todo reminder fired',
         );
+      }
+
+      // Fire note item reminders (checklist items with remind_at)
+      const dueNoteItems = await getDueNoteItemReminders();
+      for (const item of dueNoteItems) {
+        const note = await getNoteById(item.note_id);
+        if (!note) continue;
+        const userId = note.user_id;
+        const groups = deps.registeredGroups();
+
+        const userToken = tokens.find((t) => {
+          if (!t.reminder_group_jid) return false;
+          const grp = groups[t.reminder_group_jid];
+          return grp && groupHasUser(grp.memoryUserId, userId);
+        });
+
+        let targetJid: string;
+        if (userToken?.reminder_group_jid) {
+          targetJid = userToken.reminder_group_jid;
+        } else {
+          const entries = Object.entries(groups).filter(([, g]) =>
+            groupHasUser(g.memoryUserId, userId),
+          );
+          const targetEntry =
+            entries.find(([, g]) => g.isMain) ||
+            entries.find(([, g]) => g.mode === 'tmux') ||
+            entries[0];
+          if (!targetEntry) continue;
+          targetJid = targetEntry[0];
+        }
+
+        const msg = `🔔 **Note reminder:** ${item.title}\n📝 From: *${note.title}*`;
+        await deps.sendMessage(targetJid, msg);
+        await updateNoteItem(item.id, { reminder_fired_at: new Date().toISOString() });
+        logger.info({ noteItemId: item.id, noteId: item.note_id }, 'Note item reminder fired');
       }
 
       // Daily todo digest — send at DIGEST_HOUR local time

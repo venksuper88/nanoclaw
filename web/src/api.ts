@@ -213,6 +213,18 @@ export const api = {
   getNoteAudit: (id: string) =>
     request<ApiResponse<Array<{ id: string; note_id: string; action: string; actor: string; details: string | null; created_at: string }>>>(`/api/notes/${id}/audit`),
 
+  getNoteItems: (noteId: string) =>
+    request<ApiResponse<Array<{ id: string; note_id: string; title: string; status: string; position: number; created_at: string; updated_at: string }>>>(`/api/notes/${noteId}/items`),
+
+  updateNoteItem: (noteId: string, itemId: string, updates: { status?: string }) =>
+    request<ApiResponse<Array<any>>>(`/api/notes/${noteId}/items/${itemId}`, { method: 'PATCH', body: JSON.stringify(updates) }),
+
+  createNoteItem: (noteId: string, title: string) =>
+    request<ApiResponse<Array<any>>>(`/api/notes/${noteId}/items`, { method: 'POST', body: JSON.stringify({ title }) }),
+
+  deleteNoteItem: (noteId: string, itemId: string) =>
+    request<ApiResponse<Array<any>>>(`/api/notes/${noteId}/items/${itemId}`, { method: 'DELETE' }),
+
   getLogs: (folder: string) =>
     request<ApiResponse<Array<{ name: string; content: string }>>>(`/api/logs/${folder}`),
 

@@ -395,6 +395,24 @@ function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
   fs.mkdirSync(projectClaudeDir, { recursive: true });
   fs.copyFileSync(settingsFile, path.join(projectClaudeDir, 'settings.json'));
 
+  // Per-group auto-memory isolation: each agent gets its own memory directory.
+  // Without this, all agents share one auto-memory pool (scoped by git repo root),
+  // causing irrelevant cross-agent memories (~8K+ wasted tokens per session).
+  // autoMemoryDirectory is rejected from project settings.json for security,
+  // so it must go in settings.local.json (accepted from local settings).
+  const localSettings = {
+    autoMemoryDirectory: path.join(
+      os.homedir(),
+      '.claude',
+      'agent-memory',
+      group.folder,
+    ),
+  };
+  fs.writeFileSync(
+    path.join(projectClaudeDir, 'settings.local.json'),
+    JSON.stringify(localSettings, null, 2) + '\n',
+  );
+
   const projectSkills = path.join(projectClaudeDir, 'skills');
   fs.mkdirSync(projectSkills, { recursive: true });
   const syncedSkillNames = new Set<string>();

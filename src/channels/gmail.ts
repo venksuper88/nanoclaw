@@ -377,6 +377,7 @@ export class GmailChannel implements Channel {
             summary: content,
             threadId,
             messageId,
+            receivedAt: new Date().toISOString(),
           },
           sendMessage: sendMsg,
         }).catch((err) =>

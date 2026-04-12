@@ -6,8 +6,8 @@ Any operation expected to take more than 5 minutes (builds, deploys,
 test lab runs, compilations):
 
 1. Launch the command via `nohup ... &` in Bash (NOT `run_in_background`)
-2. Immediately schedule a `schedule_task` (type `once`) to check the
-   result after an appropriate delay
+2. Use the `/tasks` skill to schedule a one-time check after an
+   appropriate delay
 3. Reply to the user confirming what was launched and when the check
    is scheduled
 4. END YOUR TURN — do NOT poll, tail, read output files, or wait
@@ -64,3 +64,14 @@ Include the note ID when sharing so other agents or the user can fetch it.
 
 **Before creating a duplicate:** Search existing notes first (`?q=keyword`)
 to avoid redundancy. Update an existing note if one covers the same topic.
+
+## Todos & Reminders
+
+Use the `/todos` skill to create, update, complete, and delete todos.
+A reminder is a todo with `remind_at` set. Todos appear in Mission
+Control's Todos tab.
+
+## Scheduled Tasks
+
+Use the `/tasks` skill to schedule recurring or one-time agent tasks.
+Tasks run as full agent sessions with all tools available.

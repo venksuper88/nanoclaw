@@ -17,8 +17,10 @@ import {
 import { dashboardEvents, contextCache } from './dashboard/events.js';
 import {
   setChatSendFn,
+  setAdvanceCursorFn,
   setActiveGroupsFn,
   setMemoryService,
+  setOnTasksChangedFn,
   setSessionInterruptFn,
   setSessionKillFn,
 } from './dashboard/routes.js';
@@ -138,6 +140,25 @@ async function saveState(): Promise<void> {
     'last_agent_timestamp',
     JSON.stringify(lastAgentTimestamp),
   );
+}
+
+function refreshTaskSnapshots(): void {
+  getAllTasks()
+    .then((tasks) => {
+      const taskRows = tasks.map((t) => ({
+        id: t.id,
+        groupFolder: t.group_folder,
+        prompt: t.prompt,
+        schedule_type: t.schedule_type,
+        schedule_value: t.schedule_value,
+        status: t.status,
+        next_run: t.next_run,
+      }));
+      for (const group of Object.values(registeredGroups)) {
+        writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
+      }
+    })
+    .catch((err) => logger.warn({ err }, 'getAllTasks failed'));
 }
 
 async function registerGroup(
@@ -496,6 +517,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       }
 
       // Emit context usage — always, even without result text
+      if (!result.usage) {
+        logger.warn({ group: group.name, hasResult: !!result.result, streamed: result.streamed }, 'No usage data in onOutput callback');
+      }
       if (result.usage) {
         const totalTokens =
           (result.usage.input_tokens ?? 0) +
@@ -503,6 +527,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           (result.usage.cache_read_input_tokens ?? 0);
         const contextWindowSize = result.usage.contextWindow || 200_000; // From result event, fallback 200K
         const percent = Math.round((totalTokens / contextWindowSize) * 100);
+        logger.info(
+          { group: group.name, percent, totalTokens, contextWindowSize, usage: result.usage },
+          'Context% calculation',
+        );
         if (percent > 0) {
           const sizeKB = Math.round((totalTokens * 4) / 1024);
           dashboardEvents.emitEvent('context:update', {
@@ -1263,6 +1291,15 @@ async function main(): Promise<void> {
       }
     });
 
+    // Wire cursor advance: commands mark messages as handled so the agent loop skips them
+    setAdvanceCursorFn((chatJid, timestamp) => {
+      lastAgentTimestamp[chatJid] = timestamp;
+      saveState().catch(() => {});
+    });
+
+    // Wire task change notifications for dashboard API routes
+    setOnTasksChangedFn(refreshTaskSnapshots);
+
     // Wire memory service for dashboard scope management
     setMemoryService(memoryService);
     setActiveGroupsFn(() => queue.getActiveGroupFolders());
@@ -1621,24 +1658,7 @@ async function main(): Promise<void> {
         logger.warn({ err, commandName, groupFolder }, 'runCommand failed'),
       );
     },
-    onTasksChanged: () => {
-      getAllTasks()
-        .then((tasks) => {
-          const taskRows = tasks.map((t) => ({
-            id: t.id,
-            groupFolder: t.group_folder,
-            prompt: t.prompt,
-            schedule_type: t.schedule_type,
-            schedule_value: t.schedule_value,
-            status: t.status,
-            next_run: t.next_run,
-          }));
-          for (const group of Object.values(registeredGroups)) {
-            writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
-          }
-        })
-        .catch((err) => logger.warn({ err }, 'getAllTasks failed'));
-    },
+    onTasksChanged: refreshTaskSnapshots,
   });
   queue.setProcessMessagesFn(processGroupMessages);
   setTimeout(

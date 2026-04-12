@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -25,6 +26,7 @@ import {
   getTaskRunLogs,
   setRegisteredGroup,
   storeMessage,
+  createTask,
   updateTask,
   deleteTask,
   updateDashboardToken,
@@ -33,6 +35,9 @@ import {
   createTodo,
   deleteNote,
   deleteNoteFolder,
+  createNoteItem,
+  deleteNoteItem,
+  deleteNoteItems,
   ensureDefaultFolder,
   ensureGroupFolder,
   getAllNotes,
@@ -40,14 +45,17 @@ import {
   getDeletedNotes,
   getNoteAuditLog,
   getNoteById,
+  getNoteItems,
   getNoteFoldersByUser,
   getTodoById,
   logNoteAudit,
   purgeNote,
   restoreNote,
   searchNotes,
+  syncNoteItems,
   updateNote,
   updateNoteFolder,
+  updateNoteItem,
   updateTodo,
   deleteTodo,
   getAllScopeDefs,
@@ -72,7 +80,8 @@ import {
   fetchAndStoreTenjinSnapshot,
   getAllTenjinSnapshots,
 } from '../tenjin-snapshot.js';
-import { ASSISTANT_NAME, GROUPS_DIR } from '../config.js';
+import { ASSISTANT_NAME, GROUPS_DIR, TIMEZONE } from '../config.js';
+import { CronExpressionParser } from 'cron-parser';
 import { listCommands } from '../commands.js';
 import { getRegisteredEmailTypes } from '../email-schemas.js';
 import { dashboardEvents, contextCache } from './events.js';
@@ -186,13 +195,26 @@ export type SessionKillFn = (chatJid: string) => void;
 import type { MemoryService } from '../memory.js';
 
 let chatSendFn: ChatSendFn | null = null;
+let advanceCursorFn: ((chatJid: string, timestamp: string) => void) | null =
+  null;
 let sessionKillFn: SessionKillFn | null = null;
 let sessionInterruptFn: ((chatJid: string) => void) | null = null;
+let onTasksChangedFn: (() => void) | null = null;
 let memoryServiceRef: MemoryService | null = null;
 let activeGroupsFn: (() => string[]) | null = null;
 
 export function setChatSendFn(fn: ChatSendFn): void {
   chatSendFn = fn;
+}
+
+export function setOnTasksChangedFn(fn: () => void): void {
+  onTasksChangedFn = fn;
+}
+
+export function setAdvanceCursorFn(
+  fn: (chatJid: string, timestamp: string) => void,
+): void {
+  advanceCursorFn = fn;
 }
 
 export function setSessionKillFn(fn: SessionKillFn): void {
@@ -390,15 +412,18 @@ export async function createRouter(): Promise<Router> {
         const resolved = resolveCmd(commandName, group.folder);
         if (resolved) {
           // Store the user's command message in DB for chat history
+          const cmdTimestamp = new Date().toISOString();
           storeMessage({
             id: `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             chat_jid: chatJid,
             sender: user.name,
             sender_name: user.name,
             content: text,
-            timestamp: new Date().toISOString(),
+            timestamp: cmdTimestamp,
             is_from_me: true,
           }).catch(() => {});
+          // Advance cursor so the message loop doesn't forward this to the agent
+          advanceCursorFn?.(chatJid, cmdTimestamp);
 
           const sendMsg = async (msg: string) => {
             const agentName = group.name || ASSISTANT_NAME;
@@ -592,6 +617,7 @@ export async function createRouter(): Promise<Router> {
       return;
     }
     await updateTask(req.params.id as string, { status: 'paused' });
+    onTasksChangedFn?.();
     res.json({
       ok: true,
       data: { id: req.params.id as string, status: 'paused' },
@@ -605,6 +631,7 @@ export async function createRouter(): Promise<Router> {
       return;
     }
     await updateTask(req.params.id as string, { status: 'active' });
+    onTasksChangedFn?.();
     res.json({
       ok: true,
       data: { id: req.params.id as string, status: 'active' },
@@ -618,7 +645,113 @@ export async function createRouter(): Promise<Router> {
       return;
     }
     await deleteTask(req.params.id as string);
+    onTasksChangedFn?.();
     res.json({ ok: true });
+  });
+
+  router.post('/api/tasks', async (req: Request, res: Response) => {
+    const { prompt, schedule_type, schedule_value, context_mode, group_folder, chat_jid } = req.body;
+    if (!prompt || !schedule_type || !schedule_value) {
+      res.status(400).json({ ok: false, error: 'prompt, schedule_type, and schedule_value required' });
+      return;
+    }
+
+    const groupFolder = req.headers['x-group-folder'] as string || group_folder;
+    const chatJid = chat_jid;
+    if (!groupFolder || !chatJid) {
+      res.status(400).json({ ok: false, error: 'group_folder and chat_jid required' });
+      return;
+    }
+
+    // Compute next_run based on schedule type
+    let nextRun: string | null = null;
+    if (schedule_type === 'cron') {
+      try {
+        const interval = CronExpressionParser.parse(schedule_value, { tz: TIMEZONE });
+        nextRun = interval.next().toISOString();
+      } catch {
+        res.status(400).json({ ok: false, error: `Invalid cron: "${schedule_value}"` });
+        return;
+      }
+    } else if (schedule_type === 'interval') {
+      const ms = parseInt(schedule_value, 10);
+      if (isNaN(ms) || ms <= 0) {
+        res.status(400).json({ ok: false, error: `Invalid interval: "${schedule_value}"` });
+        return;
+      }
+      nextRun = new Date(Date.now() + ms).toISOString();
+    } else if (schedule_type === 'once') {
+      if (/[Zz]$/.test(schedule_value) || /[+-]\d{2}:\d{2}$/.test(schedule_value)) {
+        res.status(400).json({ ok: false, error: `Use local time without timezone suffix. Got "${schedule_value}"` });
+        return;
+      }
+      const date = new Date(schedule_value);
+      if (isNaN(date.getTime())) {
+        res.status(400).json({ ok: false, error: `Invalid timestamp: "${schedule_value}"` });
+        return;
+      }
+      nextRun = date.toISOString();
+    } else {
+      res.status(400).json({ ok: false, error: `Invalid schedule_type: "${schedule_type}"` });
+      return;
+    }
+
+    const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const ctxMode = context_mode === 'group' || context_mode === 'isolated' ? context_mode : 'group';
+
+    await createTask({
+      id: taskId,
+      group_folder: groupFolder,
+      chat_jid: chatJid,
+      prompt,
+      schedule_type,
+      schedule_value,
+      context_mode: ctxMode,
+      next_run: nextRun,
+      status: 'active',
+      created_at: new Date().toISOString(),
+    });
+    onTasksChangedFn?.();
+    const task = await getTaskById(taskId);
+    res.json({ ok: true, data: task });
+  });
+
+  router.patch('/api/tasks/:id', async (req: Request, res: Response) => {
+    const task = await getTaskById(req.params.id as string);
+    if (!task) {
+      res.status(404).json({ ok: false, error: 'Task not found' });
+      return;
+    }
+
+    const updates: Parameters<typeof updateTask>[1] = {};
+    if (req.body.prompt !== undefined) updates.prompt = req.body.prompt;
+    if (req.body.schedule_type !== undefined) updates.schedule_type = req.body.schedule_type;
+    if (req.body.schedule_value !== undefined) updates.schedule_value = req.body.schedule_value;
+    if (req.body.status !== undefined) updates.status = req.body.status;
+
+    // Recompute next_run if schedule changed
+    if (req.body.schedule_type || req.body.schedule_value) {
+      const merged = { ...task, ...updates };
+      if (merged.schedule_type === 'cron') {
+        try {
+          const interval = CronExpressionParser.parse(merged.schedule_value, { tz: TIMEZONE });
+          updates.next_run = interval.next().toISOString();
+        } catch {
+          res.status(400).json({ ok: false, error: `Invalid cron: "${merged.schedule_value}"` });
+          return;
+        }
+      } else if (merged.schedule_type === 'interval') {
+        const ms = parseInt(merged.schedule_value, 10);
+        if (!isNaN(ms) && ms > 0) {
+          updates.next_run = new Date(Date.now() + ms).toISOString();
+        }
+      }
+    }
+
+    await updateTask(req.params.id as string, updates);
+    onTasksChangedFn?.();
+    const updated = await getTaskById(req.params.id as string);
+    res.json({ ok: true, data: updated });
   });
 
   // ── Todos ──
@@ -651,7 +784,7 @@ export async function createRouter(): Promise<Router> {
       remind_at: remind_at || null,
       recurrence: recurrence || null,
       reminder_fired_at: null,
-      created_by: 'dashboard',
+      created_by: (req.headers['x-group-folder'] as string) || 'dashboard',
       created_at: now,
       updated_at: now,
     });
@@ -829,26 +962,33 @@ export async function createRouter(): Promise<Router> {
       args: [userId, title, actor, new Date(Date.now() - 60000).toISOString()],
     });
     if (dedup.rows.length > 0) {
-      const existing = await getNoteById((dedup.rows[0] as unknown as { id: string }).id);
+      const existing = await getNoteById(
+        (dedup.rows[0] as unknown as { id: string }).id,
+      );
       res.json({ ok: true, data: existing, deduplicated: true });
       return;
     }
 
     const id = `note-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const now = new Date().toISOString();
-    await createNote({
-      id,
-      user_id: userId,
-      folder_id: resolvedFolderId,
-      title,
-      content: content || '',
-      tags: tags || null,
-      created_by: actor,
-      created_at: now,
-      updated_at: now,
-      deleted_at: null,
-    }, actor);
+    await createNote(
+      {
+        id,
+        user_id: userId,
+        folder_id: resolvedFolderId,
+        title,
+        content: content || '',
+        tags: tags || null,
+        created_by: actor,
+        created_at: now,
+        updated_at: now,
+        deleted_at: null,
+      },
+      actor,
+    );
     const note = await getNoteById(id);
+    // Sync checklist items from content
+    if (content) await syncItemsFromContent(id, content);
     res.json({ ok: true, data: note });
   });
 
@@ -858,11 +998,16 @@ export async function createRouter(): Promise<Router> {
       res.status(404).json({ ok: false, error: 'Not found' });
       return;
     }
-    const actor = req.body.updated_by
-      || (req.headers['x-group-folder'] as string)
-      || 'dashboard';
+    const actor =
+      req.body.updated_by ||
+      (req.headers['x-group-folder'] as string) ||
+      'dashboard';
     const { updated_by, ...updates } = req.body;
     await updateNote(req.params.id as string, updates, actor);
+    // Sync checklist items if content changed
+    if (updates.content !== undefined) {
+      await syncItemsFromContent(req.params.id as string, updates.content);
+    }
     const updated = await getNoteById(req.params.id as string);
     res.json({ ok: true, data: updated });
   });
@@ -873,9 +1018,10 @@ export async function createRouter(): Promise<Router> {
       res.status(404).json({ ok: false, error: 'Not found' });
       return;
     }
-    const actor = (req.query.actor as string)
-      || (req.headers['x-group-folder'] as string)
-      || 'dashboard';
+    const actor =
+      (req.query.actor as string) ||
+      (req.headers['x-group-folder'] as string) ||
+      'dashboard';
     await deleteNote(req.params.id as string, actor);
     res.json({ ok: true });
   });
@@ -900,6 +1046,7 @@ export async function createRouter(): Promise<Router> {
       res.status(404).json({ ok: false, error: 'Not found' });
       return;
     }
+    await deleteNoteItems(req.params.id as string);
     await purgeNote(req.params.id as string);
     res.json({ ok: true });
   });
@@ -908,6 +1055,62 @@ export async function createRouter(): Promise<Router> {
   router.get('/api/notes/:id/audit', async (req: Request, res: Response) => {
     const log = await getNoteAuditLog(req.params.id as string);
     res.json({ ok: true, data: log });
+  });
+
+  // ── Note Items (checklist items) ──
+
+  /** Parse markdown checkboxes into structured items */
+  function parseCheckboxes(content: string): Array<{ title: string; checked: boolean }> {
+    const items: Array<{ title: string; checked: boolean }> = [];
+    const regex = /- \[([ x])\] (.+)/g;
+    let match;
+    while ((match = regex.exec(content)) !== null) {
+      items.push({ title: match[2].trim(), checked: match[1] === 'x' });
+    }
+    return items;
+  }
+
+  /** Sync note items from content after create/update.
+   *  Only syncs when content contains markdown checkboxes (agent-created notes).
+   *  Dashboard UI manages items via the checklist API — don't delete them
+   *  just because the TipTap editor content has no checkbox syntax. */
+  async function syncItemsFromContent(noteId: string, content: string) {
+    const items = parseCheckboxes(content);
+    if (items.length > 0) {
+      await syncNoteItems(noteId, items);
+    }
+    // No else — don't delete existing items when content has no checkboxes
+  }
+
+  router.get('/api/notes/:id/items', async (req: Request, res: Response) => {
+    const items = await getNoteItems(req.params.id as string);
+    res.json({ ok: true, data: items });
+  });
+
+  router.patch('/api/notes/:noteId/items/:itemId', async (req: Request, res: Response) => {
+    const { status, due_date, remind_at, recurrence } = req.body;
+    const updates: Record<string, unknown> = {};
+    if (status !== undefined) updates.status = status;
+    if (due_date !== undefined) updates.due_date = due_date;
+    if (remind_at !== undefined) updates.remind_at = remind_at;
+    if (recurrence !== undefined) updates.recurrence = recurrence;
+    await updateNoteItem(req.params.itemId as string, updates);
+    const items = await getNoteItems(req.params.noteId as string);
+    res.json({ ok: true, data: items });
+  });
+
+  router.post('/api/notes/:noteId/items', async (req: Request, res: Response) => {
+    const { title } = req.body;
+    if (!title) { res.status(400).json({ ok: false, error: 'title required' }); return; }
+    await createNoteItem(req.params.noteId as string, title);
+    const items = await getNoteItems(req.params.noteId as string);
+    res.json({ ok: true, data: items });
+  });
+
+  router.delete('/api/notes/:noteId/items/:itemId', async (req: Request, res: Response) => {
+    await deleteNoteItem(req.params.itemId as string);
+    const items = await getNoteItems(req.params.noteId as string);
+    res.json({ ok: true, data: items });
   });
 
   // ── Token reminder group ──
@@ -1712,17 +1915,22 @@ export async function createRouter(): Promise<Router> {
         }
       }
       // Project-scoped MCP servers from .mcp.json files
-      const { findMcpJsonFiles, groupWorkDir } = await import('../tmux-runner.js');
+      const { findMcpJsonFiles, groupWorkDir } =
+        await import('../tmux-runner.js');
       if (filterFolder) {
         // Only scan the specific group's workDir
         const groups = await getAllRegisteredGroups();
-        const group = Object.values(groups).find(g => g.folder === filterFolder);
+        const group = Object.values(groups).find(
+          (g) => g.folder === filterFolder,
+        );
         if (group) {
           const workDir = groupWorkDir(group.folder, group.workDir);
           for (const mcpJson of findMcpJsonFiles(path.resolve(workDir))) {
             try {
               const parsed = JSON.parse(fs.readFileSync(mcpJson, 'utf-8'));
-              for (const [name, config] of Object.entries(parsed.mcpServers || {})) {
+              for (const [name, config] of Object.entries(
+                parsed.mcpServers || {},
+              )) {
                 addServer(name, config, path.dirname(mcpJson));
               }
             } catch {}
@@ -1739,7 +1947,9 @@ export async function createRouter(): Promise<Router> {
             scannedFiles.add(mcpJson);
             try {
               const parsed = JSON.parse(fs.readFileSync(mcpJson, 'utf-8'));
-              for (const [name, config] of Object.entries(parsed.mcpServers || {})) {
+              for (const [name, config] of Object.entries(
+                parsed.mcpServers || {},
+              )) {
                 addServer(name, config, path.dirname(mcpJson));
               }
             } catch {}
@@ -2014,37 +2224,6 @@ export async function createRouter(): Promise<Router> {
         tokenEstimate: 213,
       },
       {
-        name: 'schedule_task',
-        description:
-          'Schedule recurring or one-time tasks with cron/interval/once',
-        tokenEstimate: 868,
-      },
-      {
-        name: 'list_tasks',
-        description: 'List all scheduled tasks for this group',
-        tokenEstimate: 77,
-      },
-      {
-        name: 'pause_task',
-        description: 'Pause a scheduled task',
-        tokenEstimate: 90,
-      },
-      {
-        name: 'resume_task',
-        description: 'Resume a paused task',
-        tokenEstimate: 80,
-      },
-      {
-        name: 'cancel_task',
-        description: 'Cancel and delete a scheduled task',
-        tokenEstimate: 85,
-      },
-      {
-        name: 'update_task',
-        description: 'Update an existing scheduled task',
-        tokenEstimate: 185,
-      },
-      {
         name: 'register_group',
         description: 'Register a new chat/group (main group only)',
         tokenEstimate: 409,
@@ -2053,31 +2232,6 @@ export async function createRouter(): Promise<Router> {
         name: 'save_memory',
         description: 'Save a fact or preference to long-term memory',
         tokenEstimate: 247,
-      },
-      {
-        name: 'add_todo',
-        description: 'Add a todo with priority, due date, reminder, recurrence',
-        tokenEstimate: 323,
-      },
-      {
-        name: 'update_todo',
-        description: 'Update an existing todo item',
-        tokenEstimate: 276,
-      },
-      {
-        name: 'complete_todo',
-        description: 'Mark a todo as done',
-        tokenEstimate: 81,
-      },
-      {
-        name: 'delete_todo',
-        description: 'Permanently delete a todo item',
-        tokenEstimate: 84,
-      },
-      {
-        name: 'list_todos',
-        description: "List the user's non-completed todos",
-        tokenEstimate: 96,
       },
       {
         name: 'run_command',
@@ -2163,6 +2317,46 @@ export async function createRouter(): Promise<Router> {
   } catch (err) {
     logger.error({ err }, 'Failed to load finance sub-app routes');
   }
+
+  // ── Analytics (Metabase embedding) ──
+  const METABASE_SITE_URL = 'https://devenanalytics.fly.dev';
+  const METABASE_SECRET_KEY = '6d14d63877af35017910f77e765338a5c4703db7bd5664f8bf50f4ca0d03a2d4';
+
+  router.get('/api/analytics/embed-url', (req: Request, res: Response) => {
+    const dashboardId = Number(req.query.dashboard) || 2; // Default: Rail Master Dashboard
+    const token = jwt.sign(
+      {
+        resource: { dashboard: dashboardId },
+        params: {},
+        exp: Math.round(Date.now() / 1000) + 600, // 10 min expiry
+      },
+      METABASE_SECRET_KEY,
+    );
+    res.json({
+      ok: true,
+      data: { url: `${METABASE_SITE_URL}/embed/dashboard/${token}#bordered=false&titled=true` },
+    });
+  });
+
+  router.get('/api/analytics/embed-question', (req: Request, res: Response) => {
+    const questionId = Number(req.query.question);
+    if (!questionId) {
+      res.status(400).json({ ok: false, error: 'question parameter required' });
+      return;
+    }
+    const token = jwt.sign(
+      {
+        resource: { question: questionId },
+        params: {},
+        exp: Math.round(Date.now() / 1000) + 600,
+      },
+      METABASE_SECRET_KEY,
+    );
+    res.json({
+      ok: true,
+      data: { url: `${METABASE_SITE_URL}/embed/question/${token}#bordered=false&titled=true` },
+    });
+  });
 
   return router;
 }

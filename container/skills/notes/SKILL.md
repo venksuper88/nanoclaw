@@ -7,6 +7,14 @@ description: Create, read, update, search, and organize notes with folders. Note
 
 Manage user notes via the DevenClaw API. Notes support markdown content, tags, full-text search, nested folders, soft-delete with trash, and audit logging.
 
+## IMPORTANT: Tasks/Items Are Separate From Note Content
+
+Note checklist items (tasks) are stored as **separate records**, NOT inside the note's `content` field. If a user asks about tasks, items, or checklist status on a note:
+
+1. **Use the items API**: `GET /api/notes/NOTE_ID/items` — this returns the actual tasks
+2. **Do NOT read the note content** expecting to find tasks — the `content` field is markdown body text only
+3. Reading the note and saying "I don't see tasks" is wrong — tasks live in the items endpoint
+
 ## Authentication
 
 All requests require a Bearer token. Always set the group folder header for proper note filing:
@@ -104,6 +112,55 @@ curl -s -H "$AUTH" "$API/api/notes/NOTE_ID/audit" | jq '.data'
 ```
 Shows create, update, delete, and restore history with actor and timestamp.
 
+## Checklist Items
+
+Notes can contain checklist items (task lists). Items are first-class records with their own status, due dates, reminders, and recurrence — not just markdown syntax.
+
+### Auto-sync from markdown
+
+When you create or update a note with markdown checkboxes, items are automatically created/synced:
+
+```markdown
+- [ ] Review PR #42
+- [x] Deploy staging build
+- [ ] Update documentation
+```
+
+Each `- [ ]` / `- [x]` line becomes a `note_item` record with `pending` or `done` status.
+
+### List items in a note
+```bash
+curl -s -H "$AUTH" "$API/api/notes/NOTE_ID/items" | jq '.data'
+```
+Returns array of items with: `id`, `title`, `status` (pending/done), `position`, `due_date`, `remind_at`, `recurrence`, `created_at`, `updated_at`.
+
+### Add an item
+```bash
+curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
+  "$API/api/notes/NOTE_ID/items" \
+  -d '{"title": "New task item"}'
+```
+
+### Update an item (status, due date, reminder)
+```bash
+curl -s -X PATCH -H "$AUTH" -H "Content-Type: application/json" \
+  "$API/api/notes/NOTE_ID/items/ITEM_ID" \
+  -d '{"status": "done"}'
+```
+Updatable fields: `status` ("pending" or "done"), `due_date` (UTC ISO), `remind_at` (UTC ISO), `recurrence` (daily, weekday, weekly, monthly, yearly).
+
+### Delete an item
+```bash
+curl -s -X DELETE -H "$AUTH" "$API/api/notes/NOTE_ID/items/ITEM_ID"
+```
+
+### Tips for checklist items
+
+- Items created via markdown sync preserve their `due_date`, `remind_at`, and `recurrence` across note edits
+- Use the items API directly (not markdown) when you need due dates or reminders on individual items
+- Items with `remind_at` fire reminders via the scheduler, just like todos
+- All item endpoints return the full updated items list for the note
+
 ## Permanent Links
 
 Every note has a permanent link via its ID:
@@ -130,3 +187,4 @@ Use this to reference notes in messages, other notes, or agent conversations. Th
 - Search is word-based, not substring — use specific terms
 - When referencing a note, include its ID so others can fetch it
 - Deletes go to trash — data is never permanently lost unless purged from the UI
+- **Don't read full note content unless asked** — if the user asks about tasks, items, or checklist status on a note, use the items API (`/api/notes/NOTE_ID/items`) directly. Only fetch the full note (`/api/notes/NOTE_ID`) when the user explicitly asks to read or view the note content.

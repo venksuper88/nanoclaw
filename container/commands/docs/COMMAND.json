@@ -1,0 +1,6 @@
+{
+  "name": "docs",
+  "description": "List all docs files with sizes in the project docs/ directory",
+  "runtime": "bash",
+  "entry": "run.sh"
+}

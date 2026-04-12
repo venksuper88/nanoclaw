@@ -34,6 +34,12 @@ function fmtDuration(ms: number): string {
   return `${(ms / 60000).toFixed(1)}m`;
 }
 
+function taskTitle(prompt: string): string {
+  const firstLine = prompt.split('\n')[0].trim();
+  if (firstLine.length <= 80) return firstLine;
+  return firstLine.slice(0, 77) + '…';
+}
+
 export function TasksView() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
@@ -70,21 +76,6 @@ export function TasksView() {
     load();
   };
 
-  const toggleLogs = async (taskId: string) => {
-    if (expandedTask === taskId) {
-      setExpandedTask(null);
-      return;
-    }
-    setExpandedTask(taskId);
-    if (!logs[taskId]) {
-      setLogsLoading(taskId);
-      try {
-        const r = await api.getTaskLogs(taskId);
-        if (r.ok) setLogs(prev => ({ ...prev, [taskId]: r.data }));
-      } catch { /* ignore */ }
-      setLogsLoading(null);
-    }
-  };
 
   return (
     <div className="tasks-view">
@@ -117,66 +108,85 @@ export function TasksView() {
       <div className="tasks-list">
         {tasks.map(task => (
           <div key={task.id} className={`task-card ${task.status}`}>
-            <div className="task-card-header">
+            <div className="task-card-row" onClick={() => setExpandedTask(expandedTask === task.id ? null : task.id)}>
               <span className={`task-status-dot ${task.status}`} />
-              <span className="task-group">{task.group_folder}</span>
-              <span className="task-schedule">{task.schedule_type}: {task.schedule_value}</span>
-            </div>
-            <div className="task-prompt">{task.prompt}</div>
-            <div className="task-meta">
-              <span>Next: {fmtDate(task.next_run)}</span>
-              <span>Last: {fmtDate(task.last_run)}</span>
-            </div>
-            {task.last_result && (
-              <div className="task-result" dangerouslySetInnerHTML={{ __html: renderMarkdown(task.last_result.slice(0, 200)) }} />
-            )}
-            <div className="task-actions">
-              <button className="task-toggle" onClick={() => toggle(task)}>
-                <span className="mi" style={{ fontSize: 18 }}>
-                  {task.status === 'active' ? 'pause' : 'play_arrow'}
+              <div className="task-card-title-col">
+                <span className="task-title">{taskTitle(task.prompt)}</span>
+                <span className="task-subtitle">
+                  {task.group_folder} &middot; {task.schedule_type}: {task.schedule_value} &middot; Next: {fmtDate(task.next_run)}
                 </span>
-                {task.status === 'active' ? 'Pause' : 'Resume'}
-              </button>
-              <button className="task-toggle" onClick={() => toggleLogs(task.id)}>
-                <span className="mi" style={{ fontSize: 18 }}>
-                  {expandedTask === task.id ? 'expand_less' : 'history'}
-                </span>
-                Logs
-              </button>
-              <button className="task-toggle task-delete" onClick={() => remove(task)}>
-                <span className="mi" style={{ fontSize: 18 }}>delete</span>
-                Delete
-              </button>
+              </div>
+              <span className="mi task-expand-icon" style={{ fontSize: 20 }}>
+                {expandedTask === task.id ? 'expand_less' : 'expand_more'}
+              </span>
             </div>
 
             {expandedTask === task.id && (
-              <div className="task-logs">
-                {logsLoading === task.id && <div className="task-logs-loading">Loading logs...</div>}
-                {logs[task.id] && logs[task.id].length === 0 && (
-                  <div className="task-logs-empty">No run history yet</div>
+              <div className="task-expanded">
+                <div className="task-prompt">{task.prompt}</div>
+                <div className="task-meta">
+                  <span>Next: {fmtDate(task.next_run)}</span>
+                  <span>Last: {fmtDate(task.last_run)}</span>
+                </div>
+                {task.last_result && (
+                  <div className="task-result" dangerouslySetInnerHTML={{ __html: renderMarkdown(task.last_result.slice(0, 200)) }} />
                 )}
-                {logs[task.id] && logs[task.id].length > 0 && (
-                  <div className="task-logs-list">
-                    {logs[task.id].map((log, i) => (
-                      <div key={i} className={`task-log-entry ${log.status}`}>
-                        <div className="task-log-header">
-                          <span className={`task-log-status ${log.status}`}>
-                            <span className="mi" style={{ fontSize: 14 }}>
-                              {log.status === 'success' ? 'check_circle' : 'error'}
-                            </span>
-                            {log.status}
-                          </span>
-                          <span className="task-log-time">{fmtDate(log.run_at)}</span>
-                          <span className="task-log-duration">{fmtDuration(log.duration_ms)}</span>
-                        </div>
-                        {log.result && (
-                          <div className="task-log-result" dangerouslySetInnerHTML={{ __html: renderMarkdown(log.result) }} />
-                        )}
-                        {log.error && (
-                          <div className="task-log-error">{log.error}</div>
-                        )}
+                <div className="task-actions">
+                  <button className="task-toggle" onClick={() => toggle(task)}>
+                    <span className="mi" style={{ fontSize: 18 }}>
+                      {task.status === 'active' ? 'pause' : 'play_arrow'}
+                    </span>
+                    {task.status === 'active' ? 'Pause' : 'Resume'}
+                  </button>
+                  <button className="task-toggle" onClick={() => {
+                    if (logs[task.id]) {
+                      setLogs(prev => { const next = { ...prev }; delete next[task.id]; return next; });
+                    } else {
+                      setLogsLoading(task.id);
+                      api.getTaskLogs(task.id).then(r => {
+                        if (r.ok) setLogs(prev => ({ ...prev, [task.id]: r.data }));
+                      }).catch(() => {}).finally(() => setLogsLoading(null));
+                    }
+                  }}>
+                    <span className="mi" style={{ fontSize: 18 }}>history</span>
+                    {logs[task.id] ? 'Hide Logs' : 'Logs'}
+                  </button>
+                  <button className="task-toggle task-delete" onClick={() => remove(task)}>
+                    <span className="mi" style={{ fontSize: 18 }}>delete</span>
+                    Delete
+                  </button>
+                </div>
+
+                {logsLoading === task.id && <div className="task-logs"><div className="task-logs-loading">Loading logs...</div></div>}
+                {logs[task.id] !== undefined && (
+                  <div className="task-logs">
+                    {logs[task.id].length === 0 && (
+                      <div className="task-logs-empty">No run history yet</div>
+                    )}
+                    {logs[task.id].length > 0 && (
+                      <div className="task-logs-list">
+                        {logs[task.id].map((log, i) => (
+                          <div key={i} className={`task-log-entry ${log.status}`}>
+                            <div className="task-log-header">
+                              <span className={`task-log-status ${log.status}`}>
+                                <span className="mi" style={{ fontSize: 14 }}>
+                                  {log.status === 'success' ? 'check_circle' : 'error'}
+                                </span>
+                                {log.status}
+                              </span>
+                              <span className="task-log-time">{fmtDate(log.run_at)}</span>
+                              <span className="task-log-duration">{fmtDuration(log.duration_ms)}</span>
+                            </div>
+                            {log.result && (
+                              <div className="task-log-result" dangerouslySetInnerHTML={{ __html: renderMarkdown(log.result) }} />
+                            )}
+                            {log.error && (
+                              <div className="task-log-error">{log.error}</div>
+                            )}
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    )}
                   </div>
                 )}
               </div>
