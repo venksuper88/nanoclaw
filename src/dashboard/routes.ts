@@ -659,12 +659,10 @@ export async function createRouter(): Promise<Router> {
       chat_jid,
     } = req.body;
     if (!prompt || !schedule_type || !schedule_value) {
-      res
-        .status(400)
-        .json({
-          ok: false,
-          error: 'prompt, schedule_type, and schedule_value required',
-        });
+      res.status(400).json({
+        ok: false,
+        error: 'prompt, schedule_type, and schedule_value required',
+      });
       return;
     }
 
@@ -706,12 +704,10 @@ export async function createRouter(): Promise<Router> {
         /[Zz]$/.test(schedule_value) ||
         /[+-]\d{2}:\d{2}$/.test(schedule_value)
       ) {
-        res
-          .status(400)
-          .json({
-            ok: false,
-            error: `Use local time without timezone suffix. Got "${schedule_value}"`,
-          });
+        res.status(400).json({
+          ok: false,
+          error: `Use local time without timezone suffix. Got "${schedule_value}"`,
+        });
         return;
       }
       const date = new Date(schedule_value);
@@ -723,12 +719,10 @@ export async function createRouter(): Promise<Router> {
       }
       nextRun = date.toISOString();
     } else {
-      res
-        .status(400)
-        .json({
-          ok: false,
-          error: `Invalid schedule_type: "${schedule_type}"`,
-        });
+      res.status(400).json({
+        ok: false,
+        error: `Invalid schedule_type: "${schedule_type}"`,
+      });
       return;
     }
 
@@ -780,12 +774,10 @@ export async function createRouter(): Promise<Router> {
           });
           updates.next_run = interval.next().toISOString();
         } catch {
-          res
-            .status(400)
-            .json({
-              ok: false,
-              error: `Invalid cron: "${merged.schedule_value}"`,
-            });
+          res.status(400).json({
+            ok: false,
+            error: `Invalid cron: "${merged.schedule_value}"`,
+          });
           return;
         }
       } else if (merged.schedule_type === 'interval') {
