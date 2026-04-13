@@ -750,7 +750,7 @@ async function runAgent(
 
   // All groups use tmux mode
   try {
-    ensureTmuxSession(group, chatJid);
+    await ensureTmuxSession(group, chatJid);
 
     // Emit agent:spawn so dashboard shows activity indicator
     dashboardEvents.emitEvent('agent:spawn', {

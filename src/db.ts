@@ -521,6 +521,26 @@ async function createSchema(database: Client): Promise<void> {
     END
   `);
 
+  // Data migration: fix agent-created notes to use group's memoryUserId instead of hardcoded 'venky'.
+  // Only runs for notes whose created_by is a dashboard_* group with a non-venky memoryUserId.
+  try {
+    const groups = await database.execute(
+      `SELECT folder, memory_user_id FROM registered_groups WHERE memory_user_id IS NOT NULL AND LOWER(memory_user_id) != 'venky'`,
+    );
+    for (const row of groups.rows) {
+      const g = row as unknown as {
+        folder: string;
+        memory_user_id: string;
+      };
+      await database.execute({
+        sql: `UPDATE notes SET user_id = ? WHERE created_by = ? AND user_id = 'venky'`,
+        args: [g.memory_user_id.toLowerCase(), g.folder],
+      });
+    }
+  } catch {
+    /* ignore — table may not exist yet on first run */
+  }
+
   // Note items — first-class checklist items within notes
   await database.execute(`
     CREATE TABLE IF NOT EXISTS note_items (
@@ -1118,9 +1138,10 @@ export async function createNoteFolder(folder: NoteFolder): Promise<void> {
 export async function getNoteFoldersByUser(
   userId: string,
 ): Promise<NoteFolder[]> {
+  // Support comma-separated user_ids (shared groups)
   const result = await db.execute({
-    sql: 'SELECT * FROM notes_folders WHERE user_id = ? ORDER BY sort_order, name',
-    args: [userId],
+    sql: `SELECT * FROM notes_folders WHERE (user_id = ? OR ',' || user_id || ',' LIKE '%,' || ? || ',%') ORDER BY sort_order, name`,
+    args: [userId, userId],
   });
   return result.rows as unknown as NoteFolder[];
 }
@@ -1294,9 +1315,10 @@ export async function getAllNotes(): Promise<Note[]> {
 }
 
 export async function getDeletedNotes(userId: string): Promise<Note[]> {
+  // Support comma-separated user_ids (shared groups): match exact or as part of list
   const result = await db.execute({
-    sql: 'SELECT * FROM notes WHERE user_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC',
-    args: [userId],
+    sql: `SELECT * FROM notes WHERE (user_id = ? OR ',' || user_id || ',' LIKE '%,' || ? || ',%') AND deleted_at IS NOT NULL ORDER BY deleted_at DESC`,
+    args: [userId, userId],
   });
   return result.rows as unknown as Note[];
 }
@@ -1306,12 +1328,13 @@ export async function searchNotes(
   query: string,
 ): Promise<Note[]> {
   // Use FTS5 for word-based search with ranking
+  // Support comma-separated user_ids (shared groups)
   const result = await db.execute({
     sql: `SELECT n.* FROM notes n
       JOIN notes_fts fts ON n.rowid = fts.rowid
-      WHERE n.user_id = ? AND n.deleted_at IS NULL AND notes_fts MATCH ?
+      WHERE (n.user_id = ? OR ',' || n.user_id || ',' LIKE '%,' || ? || ',%') AND n.deleted_at IS NULL AND notes_fts MATCH ?
       ORDER BY rank`,
-    args: [userId, query],
+    args: [userId, userId, query],
   });
   return result.rows as unknown as Note[];
 }
@@ -1668,6 +1691,20 @@ export async function getRegisteredGroup(
   };
 }
 
+/** Look up a group's memoryUserId by its folder name. */
+export async function getGroupMemoryUserId(
+  folder: string,
+): Promise<string | undefined> {
+  const result = await db.execute({
+    sql: 'SELECT memory_user_id FROM registered_groups WHERE folder = ? LIMIT 1',
+    args: [folder],
+  });
+  const row = result.rows[0] as unknown as
+    | { memory_user_id: string | null }
+    | undefined;
+  return row?.memory_user_id || 'venky';
+}
+
 export async function setRegisteredGroup(
   jid: string,
   group: RegisteredGroup,
@@ -1926,6 +1963,19 @@ export async function getDashboardToken(
   const result = await db.execute({
     sql: 'SELECT * FROM dashboard_tokens WHERE token = ?',
     args: [token],
+  });
+  return (result.rows[0] ?? undefined) as unknown as
+    | DashboardTokenRow
+    | undefined;
+}
+
+/** Look up a dashboard token by user name (case-insensitive). Returns the first match. */
+export async function getDashboardTokenByName(
+  name: string,
+): Promise<DashboardTokenRow | undefined> {
+  const result = await db.execute({
+    sql: 'SELECT * FROM dashboard_tokens WHERE LOWER(name) = ? LIMIT 1',
+    args: [name.toLowerCase()],
   });
   return (result.rows[0] ?? undefined) as unknown as
     | DashboardTokenRow

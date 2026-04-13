@@ -24,9 +24,24 @@ import {
   DATA_DIR,
   GROUPS_DIR,
 } from './config.js';
+import { getDashboardTokenByName } from './db.js';
 import { resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
+
+/**
+ * Resolve the API token for a group based on its memoryUserId.
+ * Falls back to DASHBOARD_TOKEN if no matching token is found.
+ */
+async function resolveGroupToken(group: RegisteredGroup): Promise<string> {
+  const userId = group.memoryUserId || 'venky';
+  // For comma-separated memoryUserId, use the first one
+  const primaryUser = userId.split(',')[0].trim();
+  const tokenRow = await getDashboardTokenByName(primaryUser);
+  if (tokenRow) return tokenRow.token;
+  // Fallback to owner token
+  return DASHBOARD_TOKEN;
+}
 
 const TMUX_BIN = process.env.TMUX_BIN || '/opt/homebrew/bin/tmux';
 const CLAUDE_BIN = process.env.CLAUDE_BIN || '/usr/local/bin/claude-lts';
@@ -282,7 +297,7 @@ function wrapperScriptPath(folder: string): string {
 /**
  * Set up Claude settings, skills, MCP config, and auth for a tmux group.
  */
-function setupClaudeConfig(group: RegisteredGroup, chatJid: string): void {
+async function setupClaudeConfig(group: RegisteredGroup, chatJid: string): Promise<void> {
   const claudeDir = groupClaudeDir(group.folder);
   const settingsFile = path.join(claudeDir, 'settings.json');
   fs.mkdirSync(claudeDir, { recursive: true });
@@ -489,7 +504,7 @@ export NANOCLAW_GROUP_FOLDER="${group.folder}"
 export NANOCLAW_IS_MAIN="${group.isMain ? '1' : '0'}"
 export NANOCLAW_IPC_DIR="${ipcDir}"
 export NANOCLAW_API_URL="http://localhost:${DASHBOARD_PORT}"
-export NANOCLAW_API_TOKEN="${DASHBOARD_TOKEN}"
+export NANOCLAW_API_TOKEN="${await resolveGroupToken(group)}"
 MODEL="${
     group.contextWindow === '1m'
       ? group.model === 'sonnet'
@@ -533,12 +548,12 @@ echo "{\\"type\\":\\"done\\",\\"exit_code\\":$EXIT_CODE}" > "$DONE_FILE"
  * Create a tmux session for a group if it doesn't exist.
  * The session is just a shell — claude-lts runs per-turn via the wrapper script.
  */
-export function ensureSession(group: RegisteredGroup, chatJid: string): void {
+export async function ensureSession(group: RegisteredGroup, chatJid: string): Promise<void> {
   const name = tmuxSessionName(group.folder);
   const workDir = groupWorkDir(group.folder, group.workDir);
 
   fs.mkdirSync(workDir, { recursive: true });
-  setupClaudeConfig(group, chatJid);
+  await setupClaudeConfig(group, chatJid);
 
   if (sessionExists(group.folder)) {
     logger.debug({ session: name }, 'Tmux session already exists');
@@ -911,11 +926,12 @@ export async function runTmuxAgent(
           /* ignore */
         }
 
-        // Only store session ID if the turn was truly successful (not auth error)
+        // Only store session ID if the turn was truly successful (not auth error).
+        // Note: resultText can be null when the agent sends its response entirely
+        // via send_message MCP tool — that's still a valid success.
         const isRealSuccess =
           data.exit_code === 0 &&
-          resultText &&
-          !resultText.includes('Not logged in');
+          !resultText?.includes('Not logged in');
         // Use orchestrator-measured wall time instead of claude-lts's cumulative duration_ms.
         // claude-lts accumulates duration_ms/duration_api_ms across --resume invocations,
         // making it useless for per-invocation performance alerts.

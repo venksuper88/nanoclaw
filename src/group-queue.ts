@@ -175,12 +175,17 @@ export class GroupQueue {
   /**
    * Send a follow-up message to the active container via IPC file.
    * Returns true if the message was written, false if no active container.
+   *
+   * Also marks pendingMessages so drainGroup re-processes after the current
+   * turn — in tmux -p mode, IPC input files aren't read by the agent, so the
+   * message must be picked up via processGroupMessages on the next cycle.
    */
   sendMessage(groupJid: string, text: string): boolean {
     const state = this.getGroup(groupJid);
     if (!state.active || !state.groupFolder || state.isTaskContainer)
       return false;
     state.idleWaiting = false; // Agent is about to receive work, no longer idle
+    state.pendingMessages = true; // Ensure message is re-processed after current turn
 
     const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
     try {
